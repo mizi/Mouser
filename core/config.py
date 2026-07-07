@@ -67,7 +67,7 @@ BUTTON_TO_EVENTS = {
 }
 
 DEFAULT_CONFIG = {
-    "version": 9,
+    "version": 10,
     "active_profile": "default",
     "profiles": {
         "default": {
@@ -98,6 +98,7 @@ DEFAULT_CONFIG = {
         "smart_shift_mode": "ratchet",
         "smart_shift_enabled": False,
         "smart_shift_threshold": 25,
+        "scroll_force": None,   # 1-100, ratchet firmness (enhanced 0x2111 devices only), None = leave unchanged
         "gesture_threshold": 50,
         "gesture_deadzone": 40,
         "gesture_timeout_ms": 3000,
@@ -330,12 +331,18 @@ def _migrate(cfg):
         settings.setdefault("ignore_trackpad", True)
         cfg["version"] = 9
 
+    if version < 10:
+        settings = cfg.setdefault("settings", {})
+        settings.setdefault("scroll_force", None)
+        cfg["version"] = 10
+
     cfg.setdefault("settings", {})
     cfg["settings"].setdefault("appearance_mode", "system")
     cfg["settings"].setdefault("debug_mode", False)
     cfg["settings"].setdefault("device_layout_overrides", {})
     cfg["settings"].setdefault("language", "en")
     cfg["settings"].setdefault("ignore_trackpad", True)
+    cfg["settings"].setdefault("scroll_force", None)
     cfg["settings"].setdefault("screenshot_directory", "")
     cfg["settings"].setdefault("check_for_updates", True)
     cfg["settings"].setdefault("update_check_state", {})

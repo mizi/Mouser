@@ -1364,13 +1364,20 @@ class HidGestureListener:
     def smart_shift_supported(self):
         return self._smart_shift_idx is not None
 
-    def set_smart_shift(self, mode, smart_shift_enabled=False, threshold=25):
+    @property
+    def smart_shift_force_supported(self):
+        """True only on enhanced SmartShift (0x2111) devices that support scroll_force control."""
+        return self._smart_shift_idx is not None and self._smart_shift_enhanced
+
+    def set_smart_shift(self, mode, smart_shift_enabled=False, threshold=25, scroll_force=None):
         """Queue a Smart Shift settings change.
         mode: 'ratchet' or 'freespin' (fixed mode when smart_shift_enabled=False)
         smart_shift_enabled: True to enable auto SmartShift (auto-switching)
         threshold: 1-50 sensitivity when SmartShift is enabled
+        scroll_force: 1-100 ratchet firmness (% of max force, enhanced devices only).
+                None means leave the current device scroll_force unchanged.
         Can be called from any thread.  Returns True on success."""
-        pending = (mode, smart_shift_enabled, threshold)
+        pending = (mode, smart_shift_enabled, threshold, scroll_force)
         with self._smart_shift_call_lock:
             with self._smart_shift_slot_lock:
                 self._smart_shift_result = None
@@ -1399,29 +1406,35 @@ class HidGestureListener:
         if pending == "read":
             self._apply_pending_read_smart_shift()
             return
-        mode, smart_shift_enabled, threshold = pending
+        mode, smart_shift_enabled, threshold, scroll_force = pending
         # Function IDs differ between basic (0x2110) and enhanced (0x2111):
         #   enhanced: read fn=1, write fn=2
         #   basic:    read fn=0, write fn=1
         write_fn = 2 if self._smart_shift_enhanced else 1
+        # Scroll force (byte 2) is a 0x2111-only parameter.  0x00 means "leave unchanged".
+        # Basic devices always get 0x00 (no scroll force support), and None also maps to 0x00.
+        if self._smart_shift_enhanced and scroll_force is not None:
+            scroll_force_byte = max(1, min(100, int(scroll_force)))
+        else:
+            scroll_force_byte = 0x00
         if smart_shift_enabled:
             # SmartShift enabled: mode=ratchet (0x02) + autoDisengage threshold (1-50).
             # Sending mode=0x02 explicitly avoids "no-change" ambiguity with 0x00.
             threshold = max(self.SMART_SHIFT_THRESHOLD_MIN,
                             min(self.SMART_SHIFT_THRESHOLD_MAX, int(threshold)))
             resp = self._request(self._smart_shift_idx, write_fn,
-                                 [self.SMART_SHIFT_RATCHET, threshold, 0x00])
-            label = f"SmartShift enabled (threshold={threshold})"
+                                 [self.SMART_SHIFT_RATCHET, threshold, scroll_force_byte])
+            label = f"SmartShift enabled (threshold={threshold}, scroll_force={scroll_force_byte or 'unchanged'})"
         elif mode == "freespin":
             resp = self._request(self._smart_shift_idx, write_fn,
-                                 [self.SMART_SHIFT_FREESPIN, 0x00, 0x00])
+                                 [self.SMART_SHIFT_FREESPIN, 0x00, scroll_force_byte])
             label = "fixed freespin"
         else:
             # Disable SmartShift + fixed ratchet: threshold=0xFF means always-ratchet
             # (matches Solaar's max-threshold approach; hardware ignores auto_disengage for mode writes).
             resp = self._request(self._smart_shift_idx, write_fn,
-                                 [self.SMART_SHIFT_RATCHET, self.SMART_SHIFT_DISABLE_THRESHOLD, 0x00])
-            label = "fixed ratchet (SmartShift disabled)"
+                                 [self.SMART_SHIFT_RATCHET, self.SMART_SHIFT_DISABLE_THRESHOLD, scroll_force_byte])
+            label = f"fixed ratchet (SmartShift disabled, scroll_force={scroll_force_byte or 'unchanged'})"
         if resp:
             print(f"[HidGesture] Smart Shift set to {label}")
             result = True
@@ -1485,7 +1498,9 @@ class HidGestureListener:
             _, _, _, _, p = resp
             mode_byte = p[0] if p else 0
             auto_disengage = p[1] if len(p) > 1 else 0
-            print(f"[HidGesture] Smart Shift raw: mode=0x{mode_byte:02X} auto_disengage=0x{auto_disengage:02X}")
+            # Byte 2 is the scroll_force value on enhanced devices (0x2111); 0 means not reported.
+            scroll_force = p[2] if len(p) > 2 else 0
+            print(f"[HidGesture] Smart Shift raw: mode=0x{mode_byte:02X} auto_disengage=0x{auto_disengage:02X} scroll_force={scroll_force}")
             # Freespin mode means fixed free-spin — SmartShift auto-switching is always OFF.
             # The device preserves the auto_disengage byte in freespin state, so we must
             # not use it to infer enabled=True; only ratchet mode can have SmartShift active.
@@ -1493,11 +1508,11 @@ class HidGestureListener:
             mode = "freespin" if mode_byte == self.SMART_SHIFT_FREESPIN else "ratchet"
             if mode == "freespin":
                 threshold = auto_disengage if self.SMART_SHIFT_THRESHOLD_MIN <= auto_disengage <= self.SMART_SHIFT_THRESHOLD_MAX else 25
-                result = {"mode": "freespin", "enabled": False, "threshold": threshold}
+                result = {"mode": "freespin", "enabled": False, "threshold": threshold, "scroll_force": scroll_force}
             elif self.SMART_SHIFT_THRESHOLD_MIN <= auto_disengage <= self.SMART_SHIFT_THRESHOLD_MAX:
-                result = {"mode": "ratchet", "enabled": True, "threshold": auto_disengage}
+                result = {"mode": "ratchet", "enabled": True, "threshold": auto_disengage, "scroll_force": scroll_force}
             else:
-                result = {"mode": "ratchet", "enabled": False, "threshold": 25}
+                result = {"mode": "ratchet", "enabled": False, "threshold": 25, "scroll_force": scroll_force}
             print(f"[HidGesture] Smart Shift state = {result}")
             self._finish_pending_smart_shift(result)
         else:

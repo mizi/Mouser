@@ -501,6 +501,95 @@ Item {
                             }
                         }
                     }
+
+                    // ── Scroll Force slider (enhanced 0x2111 only; hidden in freespin) ──
+                    Column {
+                        visible: backend.smartShiftForceSupported
+                                 && (backend.smartShiftEnabled || backend.smartShiftMode === "ratchet")
+                        width: parent.width
+                        spacing: 8
+
+                        Text {
+                            text: s["scroll.scroll_force_value"] || "FORCE"
+                            font {
+                                family: uiState.fontFamily
+                                pixelSize: 11
+                                bold: true
+                                letterSpacing: 0.8
+                            }
+                            color: scrollPage.theme.textDim
+                        }
+
+                        Text {
+                            text: s["scroll.scroll_force_desc"]
+                            font {
+                                family: uiState.fontFamily
+                                pixelSize: 12
+                            }
+                            color: scrollPage.theme.textSecondary
+                            wrapMode: Text.WordWrap
+                            width: parent.width
+                        }
+
+                        RowLayout {
+                            width: parent.width
+                            spacing: 8
+
+                            Text {
+                                text: "1"
+                                font { family: uiState.fontFamily; pixelSize: 11 }
+                                color: scrollPage.theme.textDim
+                            }
+
+                            WheelSafeSlider {
+                                id: scrollForceSlider
+                                Layout.fillWidth: true
+                                from: 1
+                                to: 100
+                                stepSize: 1
+                                value: backend.scrollForce
+                                accentColor: scrollPage.theme.accent
+                                accentDimColor: scrollPage.theme.accentDim
+                                trackColor: scrollPage.theme.border
+
+                                onMoved: {
+                                    scrollForceLabel.text = Math.round(value) + "%"
+                                    scrollForceDebounce.restart()
+                                }
+                            }
+
+                            Text {
+                                text: "100"
+                                font { family: uiState.fontFamily; pixelSize: 11 }
+                                color: scrollPage.theme.textDim
+                            }
+
+                            Rectangle {
+                                Layout.preferredWidth: 72
+                                Layout.preferredHeight: 36
+                                radius: 10
+                                color: scrollPage.theme.accentDim
+
+                                Text {
+                                    id: scrollForceLabel
+                                    anchors.centerIn: parent
+                                    text: backend.scrollForce + "%"
+                                    font {
+                                        family: uiState.fontFamily
+                                        pixelSize: 14
+                                        bold: true
+                                    }
+                                    color: scrollPage.theme.accent
+                                }
+                            }
+                        }
+
+                        Timer {
+                            id: scrollForceDebounce
+                            interval: 400
+                            onTriggered: backend.setScrollForce(Math.round(scrollForceSlider.value))
+                        }
+                    }
                 }
             }
 

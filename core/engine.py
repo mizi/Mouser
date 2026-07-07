@@ -258,18 +258,19 @@ class Engine:
         new_enabled = not settings.get("smart_shift_enabled", False)
         mode = settings.get("smart_shift_mode", "ratchet")
         threshold = settings.get("smart_shift_threshold", 25)
+        scroll_force = settings.get("scroll_force")
         print(f"[Engine] toggle_smart_shift -> enabled={new_enabled}")
         settings["smart_shift_enabled"] = new_enabled
         save_config(self.cfg)
         if self._smart_shift_read_cb:
             try:
-                self._smart_shift_read_cb({"mode": mode, "enabled": new_enabled, "threshold": threshold})
+                self._smart_shift_read_cb({"mode": mode, "enabled": new_enabled, "threshold": threshold, "scroll_force": scroll_force})
             except Exception:
                 pass
         hg = self.hook._hid_gesture
         if hg:
             def _write():
-                ok = hg.set_smart_shift(mode, new_enabled, threshold)
+                ok = hg.set_smart_shift(mode, new_enabled, threshold, scroll_force)
                 print(f"[Engine] toggle_smart_shift device write -> {'OK' if ok else 'FAILED'}")
             threading.Thread(target=_write, daemon=True, name="ToggleSmartShift").start()
 
@@ -283,19 +284,20 @@ class Engine:
         current_mode = settings.get("smart_shift_mode", "ratchet")
         new_mode = "freespin" if current_mode == "ratchet" else "ratchet"
         threshold = settings.get("smart_shift_threshold", 25)
+        scroll_force = settings.get("scroll_force")
         print(f"[Engine] switch_scroll_mode -> {new_mode}")
         settings["smart_shift_mode"] = new_mode
         settings["smart_shift_enabled"] = False
         save_config(self.cfg)
         if self._smart_shift_read_cb:
             try:
-                self._smart_shift_read_cb({"mode": new_mode, "enabled": False, "threshold": threshold})
+                self._smart_shift_read_cb({"mode": new_mode, "enabled": False, "threshold": threshold, "scroll_force": scroll_force})
             except Exception:
                 pass
         hg = self.hook._hid_gesture
         if hg:
             def _write():
-                ok = hg.set_smart_shift(new_mode, False, threshold)
+                ok = hg.set_smart_shift(new_mode, False, threshold, scroll_force)
                 print(f"[Engine] switch_scroll_mode device write -> {'OK' if ok else 'FAILED'}")
             threading.Thread(target=_write, daemon=True, name="SwitchScrollMode").start()
 
@@ -483,6 +485,8 @@ class Engine:
             "mode": settings.get("smart_shift_mode", "ratchet"),
             "enabled": settings.get("smart_shift_enabled", False),
             "threshold": settings.get("smart_shift_threshold", 25),
+            # None -> 0x00 - leave device scroll_force unchanged
+            "scroll_force": settings.get("scroll_force"),
         }
 
     def _run_saved_settings_replay(self):
@@ -501,6 +505,7 @@ class Engine:
         saved_ss = saved_ss_state["mode"]
         ss_enabled = saved_ss_state["enabled"]
         ss_threshold = saved_ss_state["threshold"]
+        ss_scroll_force = saved_ss_state["scroll_force"]
 
         # Phase A: apply Smart Shift immediately so the physical wheel mode
         # converges before the settled replay.
@@ -508,7 +513,7 @@ class Engine:
             if not hasattr(hg, "set_smart_shift"):
                 replay_ok = False
             else:
-                if not hg.set_smart_shift(saved_ss, ss_enabled, ss_threshold):
+                if not hg.set_smart_shift(saved_ss, ss_enabled, ss_threshold, ss_scroll_force):
                     replay_ok = False
                 if self._smart_shift_read_cb:
                     try:
@@ -537,7 +542,7 @@ class Engine:
         if saved_ss and getattr(hg, "smart_shift_supported", False):
             if not hasattr(hg, "set_smart_shift"):
                 replay_ok = False
-            elif hg.set_smart_shift(saved_ss, ss_enabled, ss_threshold):
+            elif hg.set_smart_shift(saved_ss, ss_enabled, ss_threshold, ss_scroll_force):
                 if self._smart_shift_read_cb:
                     try:
                         self._smart_shift_read_cb(saved_ss_state)
@@ -562,7 +567,7 @@ class Engine:
                         pass
             if retry_smart_shift and getattr(hg, "smart_shift_supported", False):
                 if not hasattr(hg, "set_smart_shift") or not hg.set_smart_shift(
-                    saved_ss, ss_enabled, ss_threshold
+                    saved_ss, ss_enabled, ss_threshold, ss_scroll_force
                 ):
                     replay_ok = False
                 elif self._smart_shift_read_cb:
@@ -728,20 +733,24 @@ class Engine:
         print("[Engine] No HID++ connection — DPI not applied")
         return False
 
-    def set_smart_shift(self, mode, smart_shift_enabled=False, threshold=25):
+    def set_smart_shift(self, mode, smart_shift_enabled=False, threshold=25, scroll_force=None):
         """Send Smart Shift settings to device.
         mode: 'ratchet' or 'freespin' (fixed mode when smart_shift_enabled=False)
         smart_shift_enabled: True to enable auto SmartShift
-        threshold: 1-50 sensitivity when SmartShift is enabled"""
-        print(f"[Engine] set_smart_shift({mode}, enabled={smart_shift_enabled}, threshold={threshold}) called")
+        threshold: 1-50 sensitivity when SmartShift is enabled
+        scroll_force: 1-100 ratchet firmness (% of max force, enhanced devices only).
+                None means leave the current device scroll_force unchanged."""
+        print(f"[Engine] set_smart_shift({mode}, enabled={smart_shift_enabled}, threshold={threshold}, scroll_force={scroll_force}) called")
         settings = self.cfg.setdefault("settings", {})
         settings["smart_shift_mode"] = mode
         settings["smart_shift_enabled"] = smart_shift_enabled
         settings["smart_shift_threshold"] = threshold
+        if scroll_force is not None:
+            settings["scroll_force"] = scroll_force
         save_config(self.cfg)
         hg = self.hook._hid_gesture
         if hg:
-            result = hg.set_smart_shift(mode, smart_shift_enabled, threshold)
+            result = hg.set_smart_shift(mode, smart_shift_enabled, threshold, scroll_force)
             print(f"[Engine] set_smart_shift -> {'OK' if result else 'FAILED'}")
             return result
         print("[Engine] set_smart_shift: No HID++ connection — not applied")
@@ -751,6 +760,12 @@ class Engine:
     def smart_shift_supported(self):
         hg = self.hook._hid_gesture
         return hg.smart_shift_supported if hg else False
+
+    @property
+    def smart_shift_force_supported(self):
+        """True only on enhanced SmartShift (0x2111) devices that support scroll_force control."""
+        hg = self.hook._hid_gesture
+        return hg.smart_shift_force_supported if hg else False
 
     def reload_mappings(self):
         """

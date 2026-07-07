@@ -316,13 +316,14 @@ class EngineReplayPhaseOneTests(unittest.TestCase):
         expected_ss_mode = engine.cfg["settings"]["smart_shift_mode"]
         expected_ss_enabled = engine.cfg["settings"]["smart_shift_enabled"]
         expected_ss_threshold = engine.cfg["settings"]["smart_shift_threshold"]
+        expected_ss_scroll_force = engine.cfg["settings"]["scroll_force"]
         replay_threads = self._non_battery_threads(threads)
         self.assertEqual(len(replay_threads), 1)
         replay_threads[0].run_target()
         engine.hook._hid_gesture.set_dpi.assert_called_once_with(expected_dpi)
         self.assertEqual(engine.hook._hid_gesture.set_smart_shift.call_count, 2)
         engine.hook._hid_gesture.set_smart_shift.assert_called_with(
-            expected_ss_mode, expected_ss_enabled, expected_ss_threshold
+            expected_ss_mode, expected_ss_enabled, expected_ss_threshold, expected_ss_scroll_force
         )
 
     def test_live_reconnect_replay_restores_saved_values_through_worker(self):
@@ -351,6 +352,7 @@ class EngineReplayPhaseOneTests(unittest.TestCase):
                 "mode": engine.cfg["settings"]["smart_shift_mode"],
                 "enabled": engine.cfg["settings"]["smart_shift_enabled"],
                 "threshold": engine.cfg["settings"]["smart_shift_threshold"],
+                "scroll_force": engine.cfg["settings"]["scroll_force"],
             },
         )
 
@@ -459,10 +461,11 @@ class EngineReplayPhaseOneTests(unittest.TestCase):
         expected_ss_mode = engine.cfg["settings"]["smart_shift_mode"]
         expected_ss_enabled = engine.cfg["settings"]["smart_shift_enabled"]
         expected_ss_threshold = engine.cfg["settings"]["smart_shift_threshold"]
+        expected_ss_scroll_force = engine.cfg["settings"]["scroll_force"]
         engine.hook._hid_gesture.set_dpi.assert_called_once_with(expected_dpi)
         self.assertEqual(engine.hook._hid_gesture.set_smart_shift.call_count, 2)
         engine.hook._hid_gesture.set_smart_shift.assert_called_with(
-            expected_ss_mode, expected_ss_enabled, expected_ss_threshold
+            expected_ss_mode, expected_ss_enabled, expected_ss_threshold, expected_ss_scroll_force
         )
 
     def test_replay_failure_emits_engine_status_callback(self):
