@@ -66,15 +66,12 @@ class SmartShiftWriteTests(unittest.TestCase):
         args = self._write_call_args(listener, "ratchet", True, 30, scroll_force=None)
         self.assertEqual(args[0][2][2], 0x00)
 
-    def test_scroll_force_clamped_to_max_100(self):
-        listener = self._make_listener(enhanced=True)
-        args = self._write_call_args(listener, "ratchet", True, 30, scroll_force=150)
-        self.assertEqual(args[0][2][2], 100)
-
-    def test_scroll_force_clamped_to_min_1(self):
-        listener = self._make_listener(enhanced=True)
-        args = self._write_call_args(listener, "ratchet", True, 30, scroll_force=0)
-        self.assertEqual(args[0][2][2], 1)
+    def test_scroll_force_clamped_to_valid_range(self):
+        for scroll_force, expected in ((150, 100), (0, 1)):
+            with self.subTest(scroll_force=scroll_force):
+                listener = self._make_listener(enhanced=True)
+                args = self._write_call_args(listener, "ratchet", True, 30, scroll_force=scroll_force)
+                self.assertEqual(args[0][2][2], expected)
 
     def test_scroll_force_applied_in_freespin_mode(self):
         """Scroll force byte is written even in freespin — Logitech protocol allows it."""
@@ -376,6 +373,22 @@ class EngineSmartShiftTests(unittest.TestCase):
             engine.set_smart_shift("ratchet", True, 25, scroll_force=75)
         self.assertEqual(engine.cfg["settings"]["scroll_force"], 75)
 
+    def test_set_smart_shift_clamps_scroll_force_to_valid_range(self):
+        for scroll_force, expected in ((150, 100), (0, 1)):
+            with self.subTest(scroll_force=scroll_force):
+                engine = self._make_engine()
+                with patch("core.engine.save_config"):
+                    engine.set_smart_shift("ratchet", True, 25, scroll_force=scroll_force)
+                self.assertEqual(engine.cfg["settings"]["scroll_force"], expected)
+
+    def test_set_smart_shift_forwards_clamped_scroll_force_to_hid_gesture(self):
+        engine = self._make_engine()
+        hg = Mock(smart_shift_supported=True)
+        engine.hook._hid_gesture = hg
+        with patch("core.engine.save_config"):
+            engine.set_smart_shift("ratchet", True, 25, scroll_force=150)
+        hg.set_smart_shift.assert_called_once_with("ratchet", True, 25, 100)
+
     def test_set_smart_shift_does_not_overwrite_scroll_force_when_none(self):
         """scroll_force=None means 'no-change' — must not overwrite existing config value."""
         engine = self._make_engine({"scroll_force": 60})
@@ -636,6 +649,21 @@ class BackendSmartShiftTests(unittest.TestCase):
             backend.setScrollForce(80)
         self.assertEqual(backend._cfg["settings"]["scroll_force"], 80)
         engine_mock.set_smart_shift.assert_called_once_with("ratchet", False, 25, 80)
+
+    def test_set_scroll_force_clamps_to_valid_range(self):
+        for scroll_force, expected in ((150, 100), (0, 1)):
+            with self.subTest(scroll_force=scroll_force):
+                backend = self._make_backend({
+                    "smart_shift_mode": "ratchet",
+                    "smart_shift_enabled": False,
+                    "smart_shift_threshold": 25,
+                })
+                engine_mock = Mock()
+                backend._engine = engine_mock
+                with patch("ui.backend.save_config"):
+                    backend.setScrollForce(scroll_force)
+                self.assertEqual(backend._cfg["settings"]["scroll_force"], expected)
+                engine_mock.set_smart_shift.assert_called_once_with("ratchet", False, 25, expected)
 
     def test_smart_shift_force_supported_delegates_to_engine(self):
         backend = self._make_backend()

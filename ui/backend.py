@@ -1321,6 +1321,8 @@ class Backend(QObject):
 
     def _applySmartShift(self, mode=None, enabled=None, threshold=None, scroll_force=None):
         """Update one or more SmartShift settings, persist config, and push to device."""
+        if scroll_force is not None:
+            scroll_force = max(1, min(100, int(scroll_force)))
         settings = self._cfg.setdefault("settings", {})
         current_mode = settings.get("smart_shift_mode", "ratchet")
         current_enabled = settings.get("smart_shift_enabled", False)

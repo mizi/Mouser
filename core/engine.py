@@ -740,6 +740,8 @@ class Engine:
         threshold: 1-50 sensitivity when SmartShift is enabled
         scroll_force: 1-100 ratchet firmness (% of max force, enhanced devices only).
                 None means leave the current device scroll_force unchanged."""
+        if scroll_force is not None:
+            scroll_force = max(1, min(100, int(scroll_force)))
         print(f"[Engine] set_smart_shift({mode}, enabled={smart_shift_enabled}, threshold={threshold}, scroll_force={scroll_force}) called")
         settings = self.cfg.setdefault("settings", {})
         settings["smart_shift_mode"] = mode
