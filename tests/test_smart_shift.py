@@ -284,7 +284,7 @@ class SmartShiftPendingRequestAbortTests(unittest.TestCase):
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
         for _ in range(50):
-            if listener._pending_smart_shift == ("ratchet", False, 25, None):
+            if listener._pending_smart_shift == ("ratchet", False, 25, 50):
                 break
             time.sleep(0.01)
         listener._abort_pending_smart_shift()

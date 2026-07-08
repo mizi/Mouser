@@ -258,7 +258,7 @@ class Engine:
         new_enabled = not settings.get("smart_shift_enabled", False)
         mode = settings.get("smart_shift_mode", "ratchet")
         threshold = settings.get("smart_shift_threshold", 25)
-        scroll_force = settings.get("scroll_force")
+        scroll_force = settings.get("scroll_force", 50)
         print(f"[Engine] toggle_smart_shift -> enabled={new_enabled}")
         settings["smart_shift_enabled"] = new_enabled
         save_config(self.cfg)
@@ -284,7 +284,7 @@ class Engine:
         current_mode = settings.get("smart_shift_mode", "ratchet")
         new_mode = "freespin" if current_mode == "ratchet" else "ratchet"
         threshold = settings.get("smart_shift_threshold", 25)
-        scroll_force = settings.get("scroll_force")
+        scroll_force = settings.get("scroll_force", 50)
         print(f"[Engine] switch_scroll_mode -> {new_mode}")
         settings["smart_shift_mode"] = new_mode
         settings["smart_shift_enabled"] = False
