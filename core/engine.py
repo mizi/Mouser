@@ -485,8 +485,7 @@ class Engine:
             "mode": settings.get("smart_shift_mode", "ratchet"),
             "enabled": settings.get("smart_shift_enabled", False),
             "threshold": settings.get("smart_shift_threshold", 25),
-            # None -> 0x00 - leave device scroll_force unchanged
-            "scroll_force": settings.get("scroll_force"),
+            "scroll_force": settings.get("scroll_force", 50),
         }
 
     def _run_saved_settings_replay(self):
@@ -733,22 +732,19 @@ class Engine:
         print("[Engine] No HID++ connection — DPI not applied")
         return False
 
-    def set_smart_shift(self, mode, smart_shift_enabled=False, threshold=25, scroll_force=None):
+    def set_smart_shift(self, mode, smart_shift_enabled=False, threshold=25, scroll_force=50):
         """Send Smart Shift settings to device.
         mode: 'ratchet' or 'freespin' (fixed mode when smart_shift_enabled=False)
         smart_shift_enabled: True to enable auto SmartShift
         threshold: 1-50 sensitivity when SmartShift is enabled
-        scroll_force: 1-100 ratchet firmness (% of max force, enhanced devices only).
-                None means leave the current device scroll_force unchanged."""
-        if scroll_force is not None:
-            scroll_force = max(1, min(100, int(scroll_force)))
+        scroll_force: 1-100 ratchet firmness (% of max force, enhanced devices only)"""
+        scroll_force = max(1, min(100, int(scroll_force)))
         print(f"[Engine] set_smart_shift({mode}, enabled={smart_shift_enabled}, threshold={threshold}, scroll_force={scroll_force}) called")
         settings = self.cfg.setdefault("settings", {})
         settings["smart_shift_mode"] = mode
         settings["smart_shift_enabled"] = smart_shift_enabled
         settings["smart_shift_threshold"] = threshold
-        if scroll_force is not None:
-            settings["scroll_force"] = scroll_force
+        settings["scroll_force"] = scroll_force
         save_config(self.cfg)
         hg = self.hook._hid_gesture
         if hg:

@@ -1403,5 +1403,15 @@ Item {
             hscrollSwitch.checked = backend.invertHScroll
             ignoreTrackpadSwitch.checked = backend.ignoreTrackpad
         }
+        function onSmartShiftChanged() {
+            if (!scrollForceSlider.pressed) {
+                scrollForceSlider.value = backend.scrollForce
+                scrollForceLabel.text = backend.scrollForce + "%"
+            }
+            if (!smartShiftSlider.pressed) {
+                smartShiftSlider.value = backend.smartShiftThreshold
+                smartShiftLabel.text = Math.round(backend.smartShiftThreshold * 2) + "%"
+            }
+        }
     }
 }

@@ -1369,13 +1369,12 @@ class HidGestureListener:
         """True only on enhanced SmartShift (0x2111) devices that support scroll_force control."""
         return self._smart_shift_idx is not None and self._smart_shift_enhanced
 
-    def set_smart_shift(self, mode, smart_shift_enabled=False, threshold=25, scroll_force=None):
+    def set_smart_shift(self, mode, smart_shift_enabled=False, threshold=25, scroll_force=50):
         """Queue a Smart Shift settings change.
         mode: 'ratchet' or 'freespin' (fixed mode when smart_shift_enabled=False)
         smart_shift_enabled: True to enable auto SmartShift (auto-switching)
         threshold: 1-50 sensitivity when SmartShift is enabled
-        scroll_force: 1-100 ratchet firmness (% of max force, enhanced devices only).
-                None means leave the current device scroll_force unchanged.
+        scroll_force: 1-100 ratchet firmness (% of max force, enhanced devices only)
         Can be called from any thread.  Returns True on success."""
         pending = (mode, smart_shift_enabled, threshold, scroll_force)
         with self._smart_shift_call_lock:
@@ -1411,9 +1410,9 @@ class HidGestureListener:
         #   enhanced: read fn=1, write fn=2
         #   basic:    read fn=0, write fn=1
         write_fn = 2 if self._smart_shift_enhanced else 1
-        # Scroll force (byte 2) is a 0x2111-only parameter.  0x00 means "leave unchanged".
-        # Basic devices always get 0x00 (no scroll force support), and None also maps to 0x00.
-        if self._smart_shift_enhanced and scroll_force is not None:
+        # Scroll force (byte 2) is a 0x2111-only parameter.  Basic devices always get
+        # 0x00 (no scroll force support).
+        if self._smart_shift_enhanced:
             scroll_force_byte = max(1, min(100, int(scroll_force)))
         else:
             scroll_force_byte = 0x00

@@ -494,11 +494,7 @@ class Backend(QObject):
 
     @Property(int, notify=smartShiftChanged)
     def scrollForce(self):
-        # None means "device default" (never explicitly set by user).
-        # Return 50 as a neutral UI placeholder — the real device value is loaded
-        # from hardware via read-back on connect and will overwrite None in memory.
-        v = self._cfg.get("settings", {}).get("scroll_force")  # None until user sets or device reports it
-        return int(v) if v is not None else 50
+        return int(self._cfg.get("settings", {}).get("scroll_force", 50))
 
     @Property(bool, notify=hidFeaturesReadyChanged)
     def smartShiftSupported(self):
@@ -1327,7 +1323,7 @@ class Backend(QObject):
         current_mode = settings.get("smart_shift_mode", "ratchet")
         current_enabled = settings.get("smart_shift_enabled", False)
         current_threshold = settings.get("smart_shift_threshold", 25)
-        current_scroll_force = settings.get("scroll_force")
+        current_scroll_force = settings.get("scroll_force", 50)
         next_mode = current_mode if mode is None else mode
         next_enabled = current_enabled if enabled is None else enabled
         next_threshold = current_threshold if threshold is None else threshold
@@ -1353,7 +1349,7 @@ class Backend(QObject):
                 settings.get("smart_shift_mode", "ratchet"),
                 settings.get("smart_shift_enabled", False),
                 settings.get("smart_shift_threshold", 25),
-                settings.get("scroll_force"),  # None → 0x00 (leave device default)
+                settings.get("scroll_force", 50),
             )
         self.smartShiftChanged.emit()
 

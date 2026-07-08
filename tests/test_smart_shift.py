@@ -25,7 +25,7 @@ class SmartShiftWriteTests(unittest.TestCase):
         listener._dev = object()  # non-None so the not-connected guard is passed
         return listener
 
-    def _write_call_args(self, listener, mode, enabled, threshold, scroll_force=None):
+    def _write_call_args(self, listener, mode, enabled, threshold, scroll_force=50):
         listener._request = Mock(return_value=b"\x00" * 20)
         listener._pending_smart_shift = (mode, enabled, threshold, scroll_force)
         listener._apply_pending_smart_shift()
@@ -47,7 +47,7 @@ class SmartShiftWriteTests(unittest.TestCase):
         payload = args[0][2]
         self.assertEqual(payload[0], hid_gesture.HidGestureListener.SMART_SHIFT_RATCHET)
         self.assertEqual(payload[1], 30)
-        self.assertEqual(payload[2], 0x00)  # scroll_force=None → leave unchanged
+        self.assertEqual(payload[2], 50)  # default scroll_force
 
     def test_scroll_force_written_to_byte2_for_enhanced(self):
         listener = self._make_listener(enhanced=True)
@@ -58,12 +58,6 @@ class SmartShiftWriteTests(unittest.TestCase):
         """Basic (0x2110) devices do not support scroll_force — byte 2 must always be 0x00."""
         listener = self._make_listener(enhanced=False)
         args = self._write_call_args(listener, "ratchet", True, 30, scroll_force=75)
-        self.assertEqual(args[0][2][2], 0x00)
-
-    def test_scroll_force_none_sends_zero_byte(self):
-        """scroll_force=None means leave device scroll_force unchanged; 0x00 signals no-change."""
-        listener = self._make_listener(enhanced=True)
-        args = self._write_call_args(listener, "ratchet", True, 30, scroll_force=None)
         self.assertEqual(args[0][2][2], 0x00)
 
     def test_scroll_force_clamped_to_valid_range(self):
@@ -123,7 +117,7 @@ class SmartShiftWriteTests(unittest.TestCase):
     def test_not_connected_clears_pending_and_returns_false(self):
         listener = hid_gesture.HidGestureListener()
         listener._smart_shift_idx = None  # no feature discovered
-        listener._pending_smart_shift = ("ratchet", False, 25, None)
+        listener._pending_smart_shift = ("ratchet", False, 25, 50)
         listener._apply_pending_smart_shift()
         self.assertIsNone(listener._pending_smart_shift)
         self.assertFalse(listener._smart_shift_result)
@@ -131,7 +125,7 @@ class SmartShiftWriteTests(unittest.TestCase):
     def test_failed_request_sets_result_false(self):
         listener = self._make_listener()
         listener._request = Mock(return_value=None)  # simulate HID error
-        listener._pending_smart_shift = ("ratchet", False, 25, None)
+        listener._pending_smart_shift = ("ratchet", False, 25, 50)
         listener._apply_pending_smart_shift()
         self.assertFalse(listener._smart_shift_result)
 
@@ -389,27 +383,13 @@ class EngineSmartShiftTests(unittest.TestCase):
             engine.set_smart_shift("ratchet", True, 25, scroll_force=150)
         hg.set_smart_shift.assert_called_once_with("ratchet", True, 25, 100)
 
-    def test_set_smart_shift_does_not_overwrite_scroll_force_when_none(self):
-        """scroll_force=None means 'no-change' — must not overwrite existing config value."""
-        engine = self._make_engine({"scroll_force": 60})
-        with patch("core.engine.save_config"):
-            engine.set_smart_shift("ratchet", True, 25, scroll_force=None)
-        self.assertEqual(engine.cfg["settings"]["scroll_force"], 60)
-
-    def test_set_smart_shift_does_not_overwrite_none_default_when_scroll_force_none(self):
-        """When stored scroll_force is None (device default), scroll_force=None leaves it as None."""
-        engine = self._make_engine({"scroll_force": None})
-        with patch("core.engine.save_config"):
-            engine.set_smart_shift("ratchet", True, 25, scroll_force=None)
-        self.assertIsNone(engine.cfg["settings"]["scroll_force"])
-
     def test_set_smart_shift_calls_hid_gesture_when_connected(self):
         engine = self._make_engine()
         hg = Mock(smart_shift_supported=True)
         engine.hook._hid_gesture = hg
         with patch("core.engine.save_config"):
             engine.set_smart_shift("ratchet", True, 25)
-        hg.set_smart_shift.assert_called_once_with("ratchet", True, 25, None)
+        hg.set_smart_shift.assert_called_once_with("ratchet", True, 25, 50)
 
     def test_set_smart_shift_forwards_scroll_force_to_hid_gesture(self):
         engine = self._make_engine()
@@ -584,22 +564,10 @@ class BackendSmartShiftTests(unittest.TestCase):
         self.assertIsInstance(backend.scrollForce, int)
         self.assertEqual(backend.scrollForce, 75)
 
-    def test_scroll_force_defaults_to_50_ui_placeholder(self):
-        """Config default is None (device default); UI shows 50 as a neutral placeholder."""
+    def test_scroll_force_defaults_to_50(self):
+        """Config default is 50, matching smart_shift_threshold's concrete default."""
         backend = self._make_backend()
         self.assertEqual(backend.scrollForce, 50)
-
-    def test_scroll_force_none_in_config_means_device_default(self):
-        """When config has None, the engine receives None (= 0x00 = leave unchanged)."""
-        backend = self._make_backend({"scroll_force": None})
-        engine_mock = Mock()
-        backend._engine = engine_mock
-        with patch("ui.backend.save_config"):
-            # Changing mode triggers engine call; scroll_force must be None, not 50
-            backend.setSmartShift("freespin")
-        call_kwargs = engine_mock.set_smart_shift.call_args
-        # The scroll_force argument (4th positional) must be None
-        self.assertIsNone(call_kwargs[0][3])
 
     def test_set_smart_shift_sends_all_params_to_engine(self):
         backend = self._make_backend({
@@ -1057,12 +1025,12 @@ class ConfigV9MigrationTests(unittest.TestCase):
             "settings": {"ignore_trackpad": True},
         }
 
-    def test_scroll_force_key_added_with_none(self):
-        """Migrating v9 config adds scroll_force key as None (preserve device default)."""
+    def test_scroll_force_key_added_with_default(self):
+        """Migrating v9 config adds scroll_force key with the same concrete default as threshold."""
         from core.config import _migrate
         migrated = _migrate(self._v9_config())
         self.assertIn("scroll_force", migrated["settings"])
-        self.assertIsNone(migrated["settings"]["scroll_force"])
+        self.assertEqual(migrated["settings"]["scroll_force"], 50)
 
     def test_existing_scroll_force_preserved(self):
         from core.config import _migrate

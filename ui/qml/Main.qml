@@ -40,7 +40,7 @@ ApplicationWindow {
         if (root.currentPage === page)
             return
         root.currentPage = page
-        root.forceActiveFocus(Qt.OtherFocusReason)
+        root.contentItem.forceActiveFocus(Qt.OtherFocusReason)
     }
 
     color: theme.bg
@@ -657,7 +657,9 @@ ApplicationWindow {
     // and disable them while any blocking dialog / shortcut-capture overlay is open so
     // typing flows cannot get swallowed by a global hide-to-tray shortcut.
     Shortcut {
-        sequence: StandardKey.Close
+        // On macos StandardKey.Close is Cmd-W, Cmd-F4 and Close.
+        // For multiple shortcuts, sequences needs to be an array.
+        sequences: [StandardKey.Close]
         context: Qt.WindowShortcut
         enabled: root.visible && !root.shortcutsBlocked
         onActivated: root.dismiss()
