@@ -1033,5 +1033,234 @@ class AppCatalogTests(unittest.TestCase):
         self.assertIn("/usr/lib64/firefox/firefox", resolved["aliases"])
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Scroll engine settings (v11 -> v12)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class ScrollTuningMigrationTests(unittest.TestCase):
+    def _migrate(self, cfg):
+        return config._migrate(json.loads(json.dumps(cfg)))
+
+    def test_v11_config_gains_every_scroll_key(self):
+        migrated = self._migrate({"version": 11, "settings": {}})
+
+        self.assertEqual(migrated["version"], config.DEFAULT_CONFIG["version"])
+        for key, default in config.SCROLL_TUNING_DEFAULTS.items():
+            self.assertEqual(migrated["settings"][key], default, key)
+
+    def test_every_scroll_key_is_in_the_defaults_template(self):
+        for key in config.SCROLL_TUNING_DEFAULTS:
+            self.assertIn(key, config.DEFAULT_CONFIG["settings"], key)
+
+    def test_smooth_scroll_is_off_after_an_upgrade(self):
+        migrated = self._migrate({"version": 11, "settings": {}})
+
+        self.assertFalse(migrated["settings"]["vscroll_smooth"])
+
+    def test_customized_values_survive_the_migration(self):
+        migrated = self._migrate({
+            "version": 11,
+            "settings": {
+                "vscroll_duration": 40,
+                "vscroll_speed": 25,
+                "mod_scroll_gain": 6.5,
+            },
+        })
+
+        self.assertEqual(migrated["settings"]["vscroll_duration"], 40)
+        self.assertEqual(migrated["settings"]["vscroll_speed"], 25)
+        self.assertAlmostEqual(migrated["settings"]["mod_scroll_gain"], 6.5)
+
+    def test_modified_hscroll_invert_is_seeded_from_the_plain_one(self):
+        # Shift+wheel already pans in whichever direction invert_hscroll says,
+        # so the new dedicated key has to start there or every existing user's
+        # modified pan reverses on upgrade.
+        migrated = self._migrate({
+            "version": 11,
+            "settings": {"invert_hscroll": True},
+        })
+
+        self.assertTrue(migrated["settings"]["mod_scroll_invert_hscroll"])
+
+    def test_modified_hscroll_invert_stays_off_when_the_plain_one_is(self):
+        migrated = self._migrate({
+            "version": 11,
+            "settings": {"invert_hscroll": False},
+        })
+
+        self.assertFalse(migrated["settings"]["mod_scroll_invert_hscroll"])
+
+    def test_the_always_run_tail_repairs_a_current_version_config(self):
+        # A config already stamped with the current version skips every
+        # numbered step, so a key dropped by a hand edit or a crashed write is
+        # only recoverable from the unconditional tail.
+        migrated = self._migrate({
+            "version": config.DEFAULT_CONFIG["version"],
+            "settings": {},
+        })
+
+        for key, default in config.SCROLL_TUNING_DEFAULTS.items():
+            self.assertEqual(migrated["settings"][key], default, key)
+
+    def test_the_gain_default_is_a_float(self):
+        # _validate_types accepts an int where a float is declared but not the
+        # reverse, so an int default would reset every fractional gain on load.
+        self.assertIsInstance(config.SCROLL_TUNING_DEFAULTS["mod_scroll_gain"],
+                              float)
+        self.assertIsInstance(
+            config.DEFAULT_CONFIG["settings"]["mod_scroll_gain"], float
+        )
+
+    def test_a_stored_fractional_gain_survives_type_validation(self):
+        cfg = json.loads(json.dumps(config.DEFAULT_CONFIG))
+        cfg["settings"]["mod_scroll_gain"] = 4.5
+        validated = config._validate_types(cfg, config.DEFAULT_CONFIG)
+
+        self.assertAlmostEqual(validated["settings"]["mod_scroll_gain"], 4.5)
+
+    def test_out_of_range_values_are_clamped(self):
+        migrated = self._migrate({
+            "version": 11,
+            "settings": {
+                "vscroll_duration": 9999,
+                "vscroll_speed": -8,
+                "vscroll_acceleration": 400,
+                "vscroll_smoothness": 90,
+                "hscroll_speed": 0,
+                "mod_scroll_gain": 250.0,
+            },
+        })
+
+        settings = migrated["settings"]
+        self.assertEqual(settings["vscroll_duration"], 60)
+        self.assertEqual(settings["vscroll_speed"], 1)
+        self.assertEqual(settings["vscroll_acceleration"], 60)
+        self.assertEqual(settings["vscroll_smoothness"], 5)
+        self.assertEqual(settings["hscroll_speed"], 1)
+        self.assertEqual(settings["mod_scroll_gain"], 10.0)
+
+    def test_the_brake_point_cannot_outrun_the_duration(self):
+        migrated = self._migrate({
+            "version": 11,
+            "settings": {
+                "vscroll_duration": 5,
+                "vscroll_brake_point": 12,
+            },
+        })
+
+        self.assertEqual(migrated["settings"]["vscroll_brake_point"], 5)
+
+    def test_unparseable_values_fall_back_to_defaults(self):
+        migrated = self._migrate({
+            "version": 11,
+            "settings": {
+                "vscroll_duration": "twelve",
+                "mod_scroll_gain": None,
+            },
+        })
+
+        self.assertEqual(migrated["settings"]["vscroll_duration"], 12)
+        self.assertAlmostEqual(migrated["settings"]["mod_scroll_gain"], 3.2)
+
+    def test_a_v1_config_reaches_the_current_version_with_scroll_keys(self):
+        migrated = self._migrate({"version": 1})
+
+        self.assertEqual(migrated["version"], config.DEFAULT_CONFIG["version"])
+        self.assertIn("vscroll_smooth", migrated["settings"])
+
+    def test_the_ranges_cover_every_numeric_key(self):
+        numeric = {
+            key for key, value in config.SCROLL_TUNING_DEFAULTS.items()
+            if not isinstance(value, bool)
+        }
+        self.assertEqual(numeric, set(config.SCROLL_TUNING_RANGES))
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Per-app scroll overrides
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class ProfileScrollOverrideTests(unittest.TestCase):
+    def _cfg(self, overrides=None):
+        cfg = json.loads(json.dumps(config.DEFAULT_CONFIG))
+        cfg["profiles"]["project"] = {
+            "label": "MS Project",
+            "apps": ["WINPROJ.EXE"],
+            "mappings": {},
+            "scroll_overrides": overrides if overrides is not None else {},
+        }
+        return cfg
+
+    def test_a_v11_config_gains_an_empty_override_dict_per_profile(self):
+        migrated = config._migrate({
+            "version": 11,
+            "profiles": {
+                "default": {"mappings": {}},
+                "project": {"mappings": {}},
+            },
+        })
+
+        for name in ("default", "project"):
+            self.assertEqual(
+                migrated["profiles"][name]["scroll_overrides"], {}, name)
+
+    def test_the_active_profile_override_wins(self):
+        cfg = self._cfg({"mod_scroll_shift_hscroll": False})
+        cfg["active_profile"] = "project"
+
+        self.assertFalse(
+            config.effective_scroll_settings(cfg)["mod_scroll_shift_hscroll"])
+
+    def test_another_profile_override_does_not_leak(self):
+        cfg = self._cfg({"mod_scroll_shift_hscroll": False})
+        cfg["active_profile"] = "default"
+
+        self.assertTrue(
+            config.effective_scroll_settings(cfg)["mod_scroll_shift_hscroll"])
+
+    def test_resolving_never_modifies_the_stored_settings(self):
+        cfg = self._cfg({"mod_scroll_shift_hscroll": False})
+        cfg["active_profile"] = "project"
+        config.effective_scroll_settings(cfg)
+
+        self.assertTrue(cfg["settings"]["mod_scroll_shift_hscroll"])
+
+    def test_keys_that_cannot_be_overridden_are_dropped(self):
+        # Only what PROFILE_SCROLL_OVERRIDE_KEYS lists is per-app; anything
+        # else in the dict is ignored on read and removed on load.
+        cfg = self._cfg({
+            "vscroll_speed": 50,
+            "mod_scroll_shift_hscroll": "no",
+        })
+        cfg["active_profile"] = "project"
+
+        resolved = config.effective_scroll_settings(cfg)
+        migrated = config._migrate(cfg)
+
+        self.assertEqual(resolved["vscroll_speed"],
+                         cfg["settings"]["vscroll_speed"])
+        self.assertTrue(resolved["mod_scroll_shift_hscroll"])
+        self.assertEqual(migrated["profiles"]["project"]["scroll_overrides"], {})
+
+    def test_a_corrupt_override_value_is_repaired_on_load(self):
+        cfg = self._cfg()
+        cfg["profiles"]["project"]["scroll_overrides"] = ["not", "a", "dict"]
+
+        migrated = config._migrate(cfg)
+
+        self.assertEqual(migrated["profiles"]["project"]["scroll_overrides"], {})
+
+    def test_a_new_profile_copies_its_source_overrides(self):
+        cfg = self._cfg({"mod_scroll_shift_hscroll": False})
+        with patch.object(config, "save_config"):
+            config.create_profile(cfg, "copy", copy_from="project")
+
+        self.assertEqual(cfg["profiles"]["copy"]["scroll_overrides"],
+                         {"mod_scroll_shift_hscroll": False})
+
+
 if __name__ == "__main__":
     unittest.main()

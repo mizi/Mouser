@@ -10,6 +10,10 @@ import sys
 import tempfile
 from urllib.parse import quote
 from core import app_catalog
+from core.scroll_engine import (
+    SCROLL_TUNING_DEFAULTS,
+    SCROLL_TUNING_RANGES,
+)
 
 if sys.platform == "darwin":
     CONFIG_DIR = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Mouser")
@@ -225,7 +229,7 @@ def _default_actions_ring_slots(platform=None):
 
 
 DEFAULT_CONFIG = {
-    "version": 11,
+    "version": 12,
     "active_profile": "default",
     "profiles": {
         "default": {
@@ -261,6 +265,7 @@ DEFAULT_CONFIG = {
                 "actions_ring_slots": _default_actions_ring_slots(),
             },
             "button_haptic": {},  # per-button haptic override; absent key = enabled (True)
+            "scroll_overrides": {},  # per-app scroll settings; absent key = use the global one
         }
     },
     "settings": {
@@ -297,6 +302,10 @@ DEFAULT_CONFIG = {
         "actions_ring_hover_haptic": True,
         "actions_ring_use_global": True,
         "actions_ring_slots": _default_actions_ring_slots(),
+        # Software scroll engine. Defined in core/scroll_engine.py so the
+        # slider bounds, the migration defaults and the engine's own clamp
+        # cannot disagree.
+        **SCROLL_TUNING_DEFAULTS,
     },
 }
 
@@ -389,6 +398,36 @@ def save_config(cfg):
 
 
 
+# Scroll settings an app profile may override. A key absent from a profile's
+# "scroll_overrides" falls back to the global setting, so a new profile changes
+# nothing until the user picks a value for it. Making another setting per-app
+# is a matter of adding it here; the resolver, migration and UI read this tuple.
+PROFILE_SCROLL_OVERRIDE_KEYS = (
+    "mod_scroll_shift_hscroll",
+)
+
+
+def _clean_scroll_overrides(overrides):
+    if not isinstance(overrides, dict):
+        return {}
+    return {
+        key: value for key, value in overrides.items()
+        if key in PROFILE_SCROLL_OVERRIDE_KEYS and isinstance(value, bool)
+    }
+
+
+def effective_scroll_settings(cfg, profile_name=None):
+    """Global settings with the active profile's scroll overrides applied.
+
+    Returns a new dict; the stored config is never modified.
+    """
+    settings = dict(cfg.get("settings", {}))
+    name = profile_name or cfg.get("active_profile", "default")
+    profile = cfg.get("profiles", {}).get(name, {})
+    settings.update(_clean_scroll_overrides(profile.get("scroll_overrides")))
+    return settings
+
+
 def get_active_mappings(cfg):
     """Return the mappings dict for the currently active profile."""
     profile_name = cfg.get("active_profile", "default")
@@ -459,6 +498,7 @@ def create_profile(cfg, name, label=None, copy_from="default", apps=None):
         "apps": apps if apps is not None else [],
         "mappings": dict(source.get("mappings", {})),
         "button_haptic": dict(source.get("button_haptic", {})),
+        "scroll_overrides": _clean_scroll_overrides(source.get("scroll_overrides")),
     }
     save_config(cfg)
     return cfg
@@ -730,6 +770,23 @@ def _migrate(cfg):
         settings.setdefault("scroll_force", 50)
         cfg["version"] = 11
 
+    if version < 12:
+        # v11 -> v12: software scroll engine (smooth scroll, acceleration,
+        # modifier scroll).
+        settings = cfg.setdefault("settings", {})
+        for key, default in SCROLL_TUNING_DEFAULTS.items():
+            settings.setdefault(key, default)
+        # Shift+wheel already pans, and on a device whose firmware is not
+        # inverting it that pan follows invert_hscroll. Seeding the new
+        # dedicated key from it keeps that direction where the user put it
+        # instead of flipping on upgrade.
+        settings["mod_scroll_invert_hscroll"] = bool(
+            settings.get("invert_hscroll", False)
+        )
+        for pdata in cfg.get("profiles", {}).values():
+            pdata.setdefault("scroll_overrides", {})
+        cfg["version"] = 12
+
     cfg.setdefault("settings", {})
     cfg["settings"].setdefault("appearance_mode", "system")
     cfg["settings"].setdefault("debug_mode", False)
@@ -743,6 +800,14 @@ def _migrate(cfg):
     cfg["settings"]["wheel_divert"] = coerce_wheel_divert_setting(
         cfg["settings"].get("wheel_divert", WHEEL_DIVERT_DEFAULT)
     )
+    for key, default in SCROLL_TUNING_DEFAULTS.items():
+        cfg["settings"].setdefault(key, default)
+    _clamp_scroll_tuning(cfg["settings"])
+    for pdata in cfg.get("profiles", {}).values():
+        if isinstance(pdata, dict):
+            pdata["scroll_overrides"] = _clean_scroll_overrides(
+                pdata.get("scroll_overrides")
+            )
 
     # Always migrate old wmplayer.exe → Microsoft.Media.Player.exe in profile apps
     for pdata in cfg.get("profiles", {}).values():
@@ -788,6 +853,35 @@ def _migrate(cfg):
                 mappings.setdefault(f"{btn}_tap", "none")
 
     return cfg
+
+
+def _clamp_scroll_tuning(settings):
+    """Force the scroll sliders back inside their ranges.
+
+    A hand-edited config, or one written by a build whose ranges differ, can
+    hold a duration of 900 or a gain of -4. The engine clamps too, but the UI
+    reads straight from this dict: without a clamp here a slider renders pinned
+    at one end while the mouse behaves as though it sits somewhere else.
+    """
+    for key, (low, high) in SCROLL_TUNING_RANGES.items():
+        value = settings.get(key, SCROLL_TUNING_DEFAULTS[key])
+        caster = float if isinstance(SCROLL_TUNING_DEFAULTS[key], float) else int
+        try:
+            number = caster(value)
+        except (TypeError, ValueError):
+            settings[key] = SCROLL_TUNING_DEFAULTS[key]
+            continue
+        if number != number or number in (float("inf"), float("-inf")):
+            settings[key] = SCROLL_TUNING_DEFAULTS[key]
+            continue
+        settings[key] = min(high, max(low, number))
+    # The brake point is a frame index into the stroke, so it cannot sit past
+    # the stroke's end. Dragging duration below it in the UI is the ordinary
+    # way to reach that state.
+    settings["vscroll_brake_point"] = min(
+        settings["vscroll_brake_point"], settings["vscroll_duration"]
+    )
+    return settings
 
 
 def _merge_defaults(cfg, defaults):
