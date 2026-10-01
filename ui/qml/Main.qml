@@ -280,7 +280,7 @@ ApplicationWindow {
             }
             Loader {
                 active: root.currentPage === 1 || item
-                source: "ScrollPage.qml"
+                source: "GeneralPage.qml"
             }
             Loader {
                 active: (root.currentPage === 2 || item) && backend.hapticSupported
