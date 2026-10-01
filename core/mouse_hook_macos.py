@@ -10,6 +10,16 @@ import time
 
 from core.mouse_hook_base import BaseMouseHook, HidGestureListener
 from core.mouse_hook_types import MouseEvent, hscroll_event_type
+from core.scroll_engine import AXIS_H, AXIS_V
+from core.scroll_modifiers import (
+    MOD_ALT,
+    MOD_CTRL_BIT,
+    MOD_META,
+    MOD_SHIFT_BIT,
+    ScrollAccumulator,
+    modifier_names,
+    resolve_wheel_action,
+)
 
 try:
     import objc
@@ -52,6 +62,38 @@ _BTN_TO_GESTURE_OWNER = {
 _SCROLL_INVERT_MARKER = 0x4D4F5553
 _INJECTED_EVENT_MARKER = 0x4D4F5554
 _SHIFT_WHEEL_HSCROLL_MARKER = 0x4D4F5556
+# 0x4D4F5557 is claimed by the pan feature on an open branch; taking it here
+# would make each feature swallow the other's injected events.
+_SMOOTH_SCROLL_MARKER = 0x4D4F5558
+
+# Quartz flag names rather than values: the constants only exist once
+# PyObjC has imported, and this module is imported on every platform.
+_CG_FLAG_BITS = (
+    ("kCGEventFlagMaskShift", MOD_SHIFT_BIT),
+    ("kCGEventFlagMaskControl", MOD_CTRL_BIT),
+    ("kCGEventFlagMaskAlternate", MOD_ALT),
+    ("kCGEventFlagMaskCommand", MOD_META),
+)
+
+
+def _cg_flag(name):
+    """One Quartz flag constant, or 0 when this build does not define it.
+
+    The isinstance check matters: a missing constant on a MagicMock stand-in
+    returns a truthy object, and `flags & that` yields another truthy object,
+    which would report every modifier as held.
+    """
+    flag = getattr(Quartz, name, 0)
+    return flag if isinstance(flag, int) else 0
+
+
+def _cg_flags_for(mask):
+    """Quartz flag bits for a ``core.scroll_modifiers`` mask."""
+    flags = 0
+    for name, bit in _CG_FLAG_BITS:
+        if mask & bit:
+            flags |= _cg_flag(name)
+    return flags
 _kCGEventTapDisabledByTimeout = 0xFFFFFFFE
 _kCGEventTapDisabledByUserInput = 0xFFFFFFFF
 
@@ -90,13 +132,14 @@ class MouseHook(BaseMouseHook):
             if value:
                 Quartz.CGEventSetIntegerValueField(cg_event, field, -value)
 
-    def _post_shift_hscroll_event(self, cg_event):
-        """Translate Shift+vertical-wheel into a horizontal scroll event.
+    def _post_mod_scroll_event(self, cg_event, plan):
+        """Re-post a wheel event translated by ``plan``.
 
-        The translated event has axis-1 zeroed and axis-1 deltas copied onto
-        axis-2.  The Shift modifier is stripped so that apps which already
-        translate Shift+scroll themselves do not double-translate.  The
-        `invert_hscroll` setting flips the direction.
+        A horizontal plan moves the axis-1 deltas onto axis-2 and zeroes
+        axis-1; a vertical plan (fast scroll, zoom) scales axis-1 in place.
+        ``plan.strip_mods`` clears the modifiers whose meaning the translation
+        has consumed, so an app that also translates Shift+wheel itself does
+        not translate it twice.
         """
         v_line = Quartz.CGEventGetIntegerValueField(
             cg_event, Quartz.kCGScrollWheelEventDeltaAxis1
@@ -108,10 +151,13 @@ class MouseHook(BaseMouseHook):
             cg_event, Quartz.kCGScrollWheelEventPointDeltaAxis1
         )
 
-        if self.invert_hscroll:
-            v_line = -v_line
-            v_fixed = -v_fixed
-            v_point = -v_point
+        horizontal = plan.h_scale != 0.0
+        scale = plan.h_scale if horizontal else plan.v_scale
+        # Line counts are whole; rounding each independently would let the
+        # fixed-point and line views of the same motion disagree in sign.
+        v_line = int(round(v_line * scale))
+        v_fixed = int(round(v_fixed * scale))
+        v_point = int(round(v_point * scale))
 
         is_continuous = Quartz.CGEventGetIntegerValueField(cg_event, 88)
         if is_continuous:
@@ -122,27 +168,38 @@ class MouseHook(BaseMouseHook):
             primary_delta = v_line
 
         new_event = Quartz.CGEventCreateScrollWheelEvent(
-            None, unit, 2, 0, primary_delta
+            None, unit, 2,
+            0 if horizontal else primary_delta,
+            primary_delta if horizontal else 0,
         )
         if not new_event:
             return False
 
         flags = Quartz.CGEventGetFlags(cg_event)
-        Quartz.CGEventSetFlags(new_event, flags & ~Quartz.kCGEventFlagMaskShift)
+        Quartz.CGEventSetFlags(new_event, flags & ~_cg_flags_for(plan.strip_mods))
         Quartz.CGEventSetIntegerValueField(
             new_event,
             Quartz.kCGEventSourceUserData,
             _SHIFT_WHEEL_HSCROLL_MARKER,
         )
 
-        for field_name, value in (
+        axis_fields = (
             ("kCGScrollWheelEventDeltaAxis2", v_line),
             ("kCGScrollWheelEventFixedPtDeltaAxis2", v_fixed),
             ("kCGScrollWheelEventPointDeltaAxis2", v_point),
             ("kCGScrollWheelEventDeltaAxis1", 0),
             ("kCGScrollWheelEventFixedPtDeltaAxis1", 0),
             ("kCGScrollWheelEventPointDeltaAxis1", 0),
-        ):
+        ) if horizontal else (
+            ("kCGScrollWheelEventDeltaAxis1", v_line),
+            ("kCGScrollWheelEventFixedPtDeltaAxis1", v_fixed),
+            ("kCGScrollWheelEventPointDeltaAxis1", v_point),
+            ("kCGScrollWheelEventDeltaAxis2", 0),
+            ("kCGScrollWheelEventFixedPtDeltaAxis2", 0),
+            ("kCGScrollWheelEventPointDeltaAxis2", 0),
+        )
+
+        for field_name, value in axis_fields:
             field = getattr(Quartz, field_name, None)
             if field is None:
                 continue
@@ -212,6 +269,121 @@ class MouseHook(BaseMouseHook):
             Quartz.CGEventSetIntegerValueField(inverted, field, value)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, inverted)
         return True
+
+    # ── Software scroll engine ────────────────────────────────────────────
+
+    def modifier_state(self, native_event=None):
+        """Modifiers from the flags the scroll event already carries.
+
+        No kCGEventFlagsChanged tap: watching every keystroke to learn what is
+        held would make Mouser a keylogger as far as the OS is concerned, and
+        the scroll event answers the question by itself.
+        """
+        if not _QUARTZ_OK or native_event is None:
+            return 0
+        flags = Quartz.CGEventGetFlags(native_event)
+        mask = 0
+        for name, bit in _CG_FLAG_BITS:
+            flag = _cg_flag(name)
+            if flag and (flags & flag):
+                mask |= bit
+        return mask
+
+    def _make_scroll_emitter(self):
+        if not _QUARTZ_OK:
+            return None
+        return self._emit_smooth_scroll
+
+    def _scroll_frame_wrapper(self):
+        # Per frame, not per loop: a pool held open across the loop never
+        # drains, so every autoreleased object from every frame of a glide
+        # piles up until the loop exits.
+        return objc.autorelease_pool if objc is not None else None
+
+    def _emit_smooth_scroll(self, dy, dx):
+        """Inject one frame of the glide as a pixel-unit scroll event."""
+        if not _QUARTZ_OK:
+            return
+        event = Quartz.CGEventCreateScrollWheelEvent(
+            None, Quartz.kCGScrollEventUnitPixel, 2, int(dy), int(dx)
+        )
+        if not event:
+            return
+        Quartz.CGEventSetIntegerValueField(
+            event, Quartz.kCGEventSourceUserData, _SMOOTH_SCROLL_MARKER
+        )
+        # ScrollPhase and MomentumPhase stay at 0 deliberately. Setting them
+        # makes applications treat the stream as a trackpad gesture, which
+        # brings rubber-band overscroll and, in some apps, deltas ignored
+        # outright.
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+    def _post_zoom_events(self, cg_event, outcome):
+        """Re-post a Ctrl+wheel tick as ``outcome.passthrough_repeats`` steps.
+
+        The Control flag is copied through untouched: the application reads it
+        to decide this is a zoom at all.
+        """
+        if not _QUARTZ_OK:
+            return False
+        line = Quartz.CGEventGetIntegerValueField(
+            cg_event, Quartz.kCGScrollWheelEventDeltaAxis1
+        )
+        step = outcome.passthrough_direction * max(1, abs(int(line)) or 1)
+        flags = Quartz.CGEventGetFlags(cg_event)
+        posted = False
+        for _ in range(outcome.passthrough_repeats):
+            event = Quartz.CGEventCreateScrollWheelEvent(
+                None, Quartz.kCGScrollEventUnitLine, 2, step, 0
+            )
+            if not event:
+                break
+            Quartz.CGEventSetFlags(event, flags)
+            Quartz.CGEventSetIntegerValueField(
+                event, Quartz.kCGEventSourceUserData,
+                _SHIFT_WHEEL_HSCROLL_MARKER,
+            )
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+            posted = True
+        return posted
+
+    def _handle_wheel_translation(self, cg_event, v_fixed, h_delta, mask,
+                                  from_trackpad):
+        """Modifier translation and smooth injection. True means swallow."""
+        engine = self._scroll_engine
+        # A trackpad stream is already continuous and already animated by the
+        # OS. Smoothing it again is catastrophic, and this gate is independent
+        # of ignore_trackpad, which only governs mapped-action dispatch.
+        if engine is not None and engine.config.enabled and not from_trackpad:
+            return self._push_smooth_scroll(cg_event, v_fixed, h_delta, mask)
+        if self._mod_scroll is None or h_delta != 0 or v_fixed == 0:
+            return False
+        plan = resolve_wheel_action(mask, self._mod_scroll)
+        if plan.is_noop:
+            return False
+        return self._post_mod_scroll_event(cg_event, plan)
+
+    def _push_smooth_scroll(self, cg_event, v_fixed, h_delta, mask):
+        engine = self._scroll_engine
+        names = modifier_names(mask)
+        swallow = False
+        if v_fixed:
+            v = v_fixed / 65536.0
+            outcome = engine.push_tick(
+                AXIS_V, 1 if v > 0 else -1, abs(v), modifiers=names
+            )
+            if outcome.passthrough_repeats:
+                if self._post_zoom_events(cg_event, outcome):
+                    return True
+            swallow = swallow or outcome.swallow
+        if h_delta:
+            outcome = engine.push_tick(
+                AXIS_H, 1 if h_delta > 0 else -1, abs(h_delta), modifiers=names
+            )
+            swallow = swallow or outcome.swallow
+        if swallow and self._scroll_driver is not None:
+            self._scroll_driver.wake()
+        return swallow
 
     def _emit_gesture_swipe(self, mouse_event):
         self._enqueue_dispatch_event(mouse_event)
@@ -379,17 +551,22 @@ class MouseHook(BaseMouseHook):
                 if source_marker in (
                     _SCROLL_INVERT_MARKER,
                     _SHIFT_WHEEL_HSCROLL_MARKER,
+                    _SMOOTH_SCROLL_MARKER,
                 ):
                     return cg_event
-                if self.ignore_trackpad:
-                    scroll_phase = Quartz.CGEventGetIntegerValueField(
-                        cg_event, Quartz.kCGScrollWheelEventScrollPhase
-                    )
-                    momentum_phase = Quartz.CGEventGetIntegerValueField(
-                        cg_event, Quartz.kCGScrollWheelEventMomentumPhase
-                    )
-                    if scroll_phase != 0 or momentum_phase != 0:
-                        return cg_event
+                # Both phases are read whatever ignore_trackpad says. That
+                # setting governs mapped-action dispatch; the smooth engine
+                # needs to know a trackpad produced this event regardless,
+                # because that stream is already continuous.
+                scroll_phase = Quartz.CGEventGetIntegerValueField(
+                    cg_event, Quartz.kCGScrollWheelEventScrollPhase
+                )
+                momentum_phase = Quartz.CGEventGetIntegerValueField(
+                    cg_event, Quartz.kCGScrollWheelEventMomentumPhase
+                )
+                from_trackpad = scroll_phase != 0 or momentum_phase != 0
+                if self.ignore_trackpad and from_trackpad:
+                    return cg_event
                 h_delta = Quartz.CGEventGetIntegerValueField(
                     cg_event, Quartz.kCGScrollWheelEventFixedPtDeltaAxis2
                 )
@@ -406,15 +583,12 @@ class MouseHook(BaseMouseHook):
                         self._debug_callback(f"ScrollWheel v={v_delta} h={h_delta}")
                     except Exception:
                         pass
-                if h_delta == 0:
-                    flags = Quartz.CGEventGetFlags(cg_event)
-                    if flags & Quartz.kCGEventFlagMaskShift:
-                        v_fixed = Quartz.CGEventGetIntegerValueField(
-                            cg_event,
-                            Quartz.kCGScrollWheelEventFixedPtDeltaAxis1,
-                        )
-                        if v_fixed != 0 and self._post_shift_hscroll_event(cg_event):
-                            return None
+                v_fixed = Quartz.CGEventGetIntegerValueField(
+                    cg_event, Quartz.kCGScrollWheelEventFixedPtDeltaAxis1
+                )
+                # Mapped horizontal actions are resolved first and win: a wheel
+                # tilt bound to "volume up" must fire that action and nothing
+                # else, not also pan whatever is under the pointer.
                 event_type = hscroll_event_type(h_delta)
                 if event_type:
                     mouse_event = MouseEvent(event_type, abs(h_delta))
@@ -423,6 +597,11 @@ class MouseHook(BaseMouseHook):
                     self._enqueue_dispatch_event(mouse_event)
                     mouse_event = None
                 if should_block:
+                    return None
+                mask = self.modifier_state(cg_event)
+                if self._handle_wheel_translation(
+                    cg_event, v_fixed, h_delta, mask, from_trackpad
+                ):
                     return None
                 if (self.invert_vscroll or self.invert_hscroll) and not self.wheel_native_invert_active:
                     if self._post_inverted_scroll_event(cg_event):

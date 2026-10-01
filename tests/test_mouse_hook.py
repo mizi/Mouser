@@ -1425,26 +1425,52 @@ class LinuxShiftWheelHScrollTests(unittest.TestCase):
         self.assertNotIn(non_keyboard, hook._keyboard_devices)
         self.assertTrue(non_keyboard.close.called)
 
-    def test_shift_held_reflects_active_keys(self):
+    def test_modifier_mask_reflects_active_keys(self):
         module = self._reload_for_linux()
         ecodes = module._ecodes
         keyboard = self._make_keyboard(active_keys=[ecodes.KEY_LEFTSHIFT])
         hook, _ = self._install_hook(module, keyboards=[keyboard])
         hook._ensure_keyboard_devices()
 
-        self.assertTrue(hook._shift_held())
+        self.assertTrue(hook._read_modifier_mask() & module.MOD_SHIFT_BIT)
 
         keyboard.set_active_keys([])
-        self.assertFalse(hook._shift_held())
+        self.assertEqual(hook._read_modifier_mask(), 0)
 
         keyboard.set_active_keys([ecodes.KEY_RIGHTSHIFT])
-        self.assertTrue(hook._shift_held())
+        self.assertTrue(hook._read_modifier_mask() & module.MOD_SHIFT_BIT)
+
+    def test_the_modifier_mask_is_cached_across_a_burst(self):
+        # One EVIOCGKEY ioctl per device per read; a hi-res burst is ~15 events
+        # a millisecond apart and the answer cannot have changed between them.
+        module = self._reload_for_linux()
+        ecodes = module._ecodes
+        keyboard = self._make_keyboard(active_keys=[ecodes.KEY_LEFTSHIFT])
+        hook, _ = self._install_hook(module, keyboards=[keyboard])
+        hook._ensure_keyboard_devices()
+
+        first = hook.modifier_state()
+        keyboard.set_active_keys([])
+
+        self.assertEqual(hook.modifier_state(), first)
+
+    def test_a_keyboard_that_raises_oserror_is_dropped(self):
+        module = self._reload_for_linux()
+        ecodes = module._ecodes
+        keyboard = self._make_keyboard(active_keys=[ecodes.KEY_LEFTSHIFT])
+        hook, _ = self._install_hook(module, keyboards=[keyboard])
+        hook._ensure_keyboard_devices()
+        keyboard.active_keys = Mock(side_effect=OSError("device gone"))
+
+        self.assertEqual(hook._read_modifier_mask(), 0)
+        self.assertNotIn(keyboard, hook._keyboard_devices)
 
     def test_rel_wheel_with_shift_translates_to_hwheel(self):
         module = self._reload_for_linux()
         ecodes = module._ecodes
         keyboard = self._make_keyboard(active_keys=[ecodes.KEY_LEFTSHIFT])
         hook, _ = self._install_hook(module, keyboards=[keyboard])
+        hook.configure_smooth_scroll({"vscroll_smooth": False})
         hook._ensure_keyboard_devices()
 
         event = self._make_rel_event(ecodes.REL_WHEEL, 1)
@@ -1460,6 +1486,7 @@ class LinuxShiftWheelHScrollTests(unittest.TestCase):
         ecodes = module._ecodes
         keyboard = self._make_keyboard(active_keys=[])
         hook, _ = self._install_hook(module, keyboards=[keyboard])
+        hook.configure_smooth_scroll({"vscroll_smooth": False})
         hook._ensure_keyboard_devices()
 
         event = self._make_rel_event(ecodes.REL_WHEEL, 1)
@@ -1468,12 +1495,15 @@ class LinuxShiftWheelHScrollTests(unittest.TestCase):
         hook._uinput.write_event.assert_called_once_with(event)
         hook._uinput.write.assert_not_called()
 
-    def test_invert_hscroll_flips_translated_direction(self):
+    def test_mod_invert_hscroll_flips_translated_direction(self):
         module = self._reload_for_linux()
         ecodes = module._ecodes
         keyboard = self._make_keyboard(active_keys=[ecodes.KEY_LEFTSHIFT])
         hook, _ = self._install_hook(module, keyboards=[keyboard])
-        hook.invert_hscroll = True
+        hook.configure_smooth_scroll({
+            "vscroll_smooth": False,
+            "mod_scroll_invert_hscroll": True,
+        })
         hook._ensure_keyboard_devices()
 
         event = self._make_rel_event(ecodes.REL_WHEEL, 2)
@@ -1483,11 +1513,34 @@ class LinuxShiftWheelHScrollTests(unittest.TestCase):
             ecodes.EV_REL, ecodes.REL_HWHEEL, -2
         )
 
+    def test_the_plain_hscroll_invert_does_not_reach_the_modified_pan(self):
+        # Independent settings: a firmware inverting device flips invert_hscroll
+        # without that silently reversing Shift+wheel on this platform only,
+        # which is what used to differ between Linux and the other two.
+        module = self._reload_for_linux()
+        ecodes = module._ecodes
+        keyboard = self._make_keyboard(active_keys=[ecodes.KEY_LEFTSHIFT])
+        hook, _ = self._install_hook(module, keyboards=[keyboard])
+        hook.invert_hscroll = True
+        hook.configure_smooth_scroll({
+            "vscroll_smooth": False,
+            "mod_scroll_invert_hscroll": False,
+        })
+        hook._ensure_keyboard_devices()
+
+        event = self._make_rel_event(ecodes.REL_WHEEL, 2)
+        hook._handle_rel(event)
+
+        hook._uinput.write.assert_called_once_with(
+            ecodes.EV_REL, ecodes.REL_HWHEEL, 2
+        )
+
     def test_rel_wheel_hi_res_with_shift_is_suppressed(self):
         module = self._reload_for_linux()
         ecodes = module._ecodes
         keyboard = self._make_keyboard(active_keys=[ecodes.KEY_LEFTSHIFT])
         hook, _ = self._install_hook(module, keyboards=[keyboard], mouse_hi_res=True)
+        hook.configure_smooth_scroll({"vscroll_smooth": False})
         hook._ensure_keyboard_devices()
 
         event = self._make_rel_event(ecodes.REL_WHEEL_HI_RES, 60)
@@ -1495,6 +1548,90 @@ class LinuxShiftWheelHScrollTests(unittest.TestCase):
 
         hook._uinput.write.assert_not_called()
         hook._uinput.write_event.assert_not_called()
+
+    def test_smooth_scroll_swallows_the_wheel(self):
+        module = self._reload_for_linux()
+        ecodes = module._ecodes
+        keyboard = self._make_keyboard(active_keys=[])
+        hook, _ = self._install_hook(module, keyboards=[keyboard])
+        self.addCleanup(hook.configure_smooth_scroll, None)
+        hook.configure_smooth_scroll({"vscroll_smooth": True})
+        if hook._scroll_driver is not None:
+            hook._scroll_driver.stop()
+            hook._scroll_driver = None
+        hook._ensure_keyboard_devices()
+
+        hook._handle_rel(self._make_rel_event(ecodes.REL_WHEEL, 1))
+
+        hook._uinput.write_event.assert_not_called()
+        self.assertFalse(hook._scroll_engine.idle)
+
+    def test_a_hires_device_ignores_the_legacy_twin_of_the_same_motion(self):
+        # The kernel sends REL_WHEEL_HI_RES and REL_WHEEL for one detent.
+        # Counting both is the double-scroll bug this guards against.
+        module = self._reload_for_linux()
+        ecodes = module._ecodes
+        keyboard = self._make_keyboard(active_keys=[])
+        hook, _ = self._install_hook(module, keyboards=[keyboard],
+                                     mouse_hi_res=True)
+        self.addCleanup(hook.configure_smooth_scroll, None)
+        hook.configure_smooth_scroll({"vscroll_smooth": True})
+        if hook._scroll_driver is not None:
+            hook._scroll_driver.stop()
+            hook._scroll_driver = None
+        hook._ensure_keyboard_devices()
+
+        hook._handle_rel(self._make_rel_event(ecodes.REL_WHEEL_HI_RES, 120))
+        hires_only = sum(f[0] for f in self._drain_engine(hook))
+
+        hook._scroll_engine.reset()
+        hook._handle_rel(self._make_rel_event(ecodes.REL_WHEEL_HI_RES, 120))
+        hook._handle_rel(self._make_rel_event(ecodes.REL_WHEEL, 1))
+        both = sum(f[0] for f in self._drain_engine(hook))
+
+        self.assertEqual(hires_only, both)
+
+    def test_the_injected_frame_writes_hi_res_units(self):
+        module = self._reload_for_linux()
+        ecodes = module._ecodes
+        keyboard = self._make_keyboard(active_keys=[])
+        hook, _ = self._install_hook(module, keyboards=[keyboard])
+
+        hook._emit_smooth_scroll(40, 0)
+
+        hook._uinput.write.assert_called_once_with(
+            ecodes.EV_REL, ecodes.REL_WHEEL_HI_RES, -120
+        )
+
+    def test_a_closed_uinput_drops_the_write_instead_of_crashing(self):
+        module = self._reload_for_linux()
+        ecodes = module._ecodes
+        keyboard = self._make_keyboard(active_keys=[])
+        hook, _ = self._install_hook(module, keyboards=[keyboard])
+        hook._close_uinput()
+
+        self.assertFalse(hook._uinput_write(("rel", ecodes.REL_WHEEL, 1)))
+
+    def test_smooth_scroll_asks_for_the_hi_res_capabilities(self):
+        module = self._reload_for_linux()
+        ecodes = module._ecodes
+        keyboard = self._make_keyboard(active_keys=[])
+        hook, mouse = self._install_hook(module, keyboards=[keyboard],
+                                         mouse_hi_res=True)
+
+        events = hook._filtered_uinput_events(mouse, hi_res=True)
+
+        self.assertIn(ecodes.REL_WHEEL_HI_RES, events[ecodes.EV_REL])
+        self.assertIn(ecodes.REL_HWHEEL_HI_RES, events[ecodes.EV_REL])
+
+    def _drain_engine(self, hook, limit=500):
+        frames = []
+        for _ in range(limit):
+            frame = hook._scroll_engine.next_frame()
+            if frame is None:
+                break
+            frames.append(frame)
+        return frames
 
     def test_filtered_uinput_events_always_adds_rel_hwheel(self):
         module = self._reload_for_linux()
@@ -1549,7 +1686,8 @@ class MacOSShiftWheelHScrollTests(unittest.TestCase):
                 mouse_hook.Quartz, MagicMock):
             del mouse_hook.Quartz
 
-    def _make_hook(self, *, block_hscroll=True):
+    def _make_hook(self, *, block_hscroll=True, mod_invert_h=False,
+                   shift_hscroll=True):
         hook = mouse_hook.MouseHook()
         hook._running = True
         hook._tap = MagicMock(name="tap")
@@ -1558,6 +1696,13 @@ class MacOSShiftWheelHScrollTests(unittest.TestCase):
             thumb_button_via_hid=False,
             gesture_via_sense_panel=False,
         )
+        # Modifier translation is configured, not hardcoded: an unconfigured
+        # hook translates nothing, which is what "Mouser disabled" looks like.
+        hook.configure_smooth_scroll({
+            "vscroll_smooth": False,
+            "mod_scroll_shift_hscroll": shift_hscroll,
+            "mod_scroll_invert_hscroll": mod_invert_h,
+        })
         if block_hscroll:
             hook.block(mouse_hook.MouseEvent.HSCROLL_LEFT)
             hook.block(mouse_hook.MouseEvent.HSCROLL_RIGHT)
@@ -1679,10 +1824,9 @@ class MacOSShiftWheelHScrollTests(unittest.TestCase):
         # Existing hscroll path: blocked + dispatched, but NOT translated.
         self.mock_quartz.CGEventCreateScrollWheelEvent.assert_not_called()
 
-    def test_invert_hscroll_flips_translated_direction(self):
-        """`invert_hscroll` must flip the sign of the translated horizontal delta."""
-        hook = self._make_hook()
-        hook.invert_hscroll = True
+    def test_mod_invert_hscroll_flips_translated_direction(self):
+        """The modified-pan invert flips the translated horizontal delta."""
+        hook = self._make_hook(mod_invert_h=True)
         cg_event = MagicMock(name="cg_event")
         self.mock_quartz.CGEventGetIntegerValueField.side_effect = \
             self._field_getter(v_line=1, v_fixed=65536, v_point=10)
@@ -1707,10 +1851,9 @@ class MacOSShiftWheelHScrollTests(unittest.TestCase):
         self.assertEqual(len(axis2_fixed_calls), 1)
         self.assertEqual(axis2_fixed_calls[0].args[2], -65536)
 
-    def test_invert_hscroll_off_preserves_translated_direction(self):
-        """Default (invert_hscroll=False) keeps the original sign on translation."""
-        hook = self._make_hook()
-        hook.invert_hscroll = False
+    def test_mod_invert_off_preserves_translated_direction(self):
+        """The default keeps the original sign on translation."""
+        hook = self._make_hook(mod_invert_h=False)
         cg_event = MagicMock(name="cg_event")
         self.mock_quartz.CGEventGetIntegerValueField.side_effect = \
             self._field_getter(v_line=1, v_fixed=65536, v_point=10)
@@ -1724,6 +1867,280 @@ class MacOSShiftWheelHScrollTests(unittest.TestCase):
 
         create_args = self.mock_quartz.CGEventCreateScrollWheelEvent.call_args
         self.assertEqual(create_args.args[4], 1)
+
+    def test_the_plain_hscroll_invert_does_not_reach_the_modified_pan(self):
+        # Independent settings: a firmware inverting device flips invert_hscroll
+        # without that silently reversing Shift+wheel too.
+        hook = self._make_hook(mod_invert_h=False)
+        hook.invert_hscroll = True
+        cg_event = MagicMock(name="cg_event")
+        self.mock_quartz.CGEventGetIntegerValueField.side_effect = \
+            self._field_getter(v_line=1, v_fixed=65536, v_point=10)
+        self.mock_quartz.CGEventGetFlags.return_value = (
+            self._kCGEventFlagMaskShift)
+        self.mock_quartz.CGEventCreateScrollWheelEvent.return_value = MagicMock()
+
+        hook._event_tap_callback(
+            None, self._kCGEventScrollWheel, cg_event, None)
+
+        create_args = self.mock_quartz.CGEventCreateScrollWheelEvent.call_args
+        self.assertEqual(create_args.args[4], 1)
+
+    def test_shift_translation_can_be_switched_off(self):
+        hook = self._make_hook(shift_hscroll=False)
+        cg_event = MagicMock(name="cg_event")
+        self.mock_quartz.CGEventGetIntegerValueField.side_effect = \
+            self._field_getter(v_line=1, v_fixed=65536, v_point=10)
+        self.mock_quartz.CGEventGetFlags.return_value = (
+            self._kCGEventFlagMaskShift)
+
+        result = hook._event_tap_callback(
+            None, self._kCGEventScrollWheel, cg_event, None)
+
+        self.assertIs(result, cg_event)
+        self.mock_quartz.CGEventCreateScrollWheelEvent.assert_not_called()
+
+    def test_an_unconfigured_hook_translates_nothing(self):
+        hook = self._make_hook()
+        hook.configure_smooth_scroll(None)
+        cg_event = MagicMock(name="cg_event")
+        self.mock_quartz.CGEventGetIntegerValueField.side_effect = \
+            self._field_getter(v_line=1, v_fixed=65536, v_point=10)
+        self.mock_quartz.CGEventGetFlags.return_value = (
+            self._kCGEventFlagMaskShift)
+
+        result = hook._event_tap_callback(
+            None, self._kCGEventScrollWheel, cg_event, None)
+
+        self.assertIs(result, cg_event)
+        self.mock_quartz.CGEventCreateScrollWheelEvent.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# macOS smooth scroll injection
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class MacOSSmoothScrollTests(unittest.TestCase):
+    _kCGEventScrollWheel = 22
+    _kCGEventFlagMaskShift = 0x00020000
+    _kCGEventFlagMaskControl = 0x00040000
+    _kCGEventFlagMaskAlternate = 0x00080000
+    _AXIS1_FIXED = "kCGScrollWheelEventFixedPtDeltaAxis1"
+    _PHASE = "kCGScrollWheelEventScrollPhase"
+    _MOMENTUM = "kCGScrollWheelEventMomentumPhase"
+
+    def setUp(self):
+        self.mock_quartz = MagicMock(name="Quartz")
+        self.mock_quartz.kCGEventScrollWheel = self._kCGEventScrollWheel
+        self.mock_quartz.kCGEventFlagMaskShift = self._kCGEventFlagMaskShift
+        self.mock_quartz.kCGEventFlagMaskControl = self._kCGEventFlagMaskControl
+        self.mock_quartz.kCGEventFlagMaskAlternate = self._kCGEventFlagMaskAlternate
+        self.mock_quartz.kCGScrollEventUnitLine = 0
+        self.mock_quartz.kCGScrollEventUnitPixel = 1
+        self.mock_quartz.kCGScrollWheelEventScrollPhase = self._PHASE
+        self.mock_quartz.kCGScrollWheelEventMomentumPhase = self._MOMENTUM
+        self.mock_quartz.kCGScrollWheelEventFixedPtDeltaAxis1 = self._AXIS1_FIXED
+        mouse_hook.Quartz = self.mock_quartz
+        self.hooks = []
+
+    def tearDown(self):
+        for hook in self.hooks:
+            hook.configure_smooth_scroll(None)
+        if hasattr(mouse_hook, "Quartz") and isinstance(
+                mouse_hook.Quartz, MagicMock):
+            del mouse_hook.Quartz
+
+    def _make_hook(self, *, smooth=True, ignore_trackpad=True, **settings):
+        hook = mouse_hook.MouseHook()
+        self.hooks.append(hook)
+        hook._running = True
+        hook._tap = MagicMock(name="tap")
+        hook.ignore_trackpad = ignore_trackpad
+        hook._connected_device = SimpleNamespace(
+            key="mx_master_3s",
+            thumb_button_via_hid=False,
+            gesture_via_sense_panel=False,
+        )
+        hook.block(mouse_hook.MouseEvent.HSCROLL_LEFT)
+        hook.block(mouse_hook.MouseEvent.HSCROLL_RIGHT)
+        payload = {"vscroll_smooth": smooth}
+        payload.update(settings)
+        hook.configure_smooth_scroll(payload)
+        # The driver runs a real thread; the tests drive the engine directly.
+        if hook._scroll_driver is not None:
+            hook._scroll_driver.stop()
+            hook._scroll_driver = None
+        return hook
+
+    def _field_getter(self, *, v_fixed=0, h_fixed=0, phase=0, momentum=0,
+                      source_user_data=0):
+        def _get(event, field):
+            if field == self.mock_quartz.kCGEventSourceUserData:
+                return source_user_data
+            if field == self.mock_quartz.kCGScrollWheelEventFixedPtDeltaAxis2:
+                return h_fixed
+            if field == self._AXIS1_FIXED:
+                return v_fixed
+            if field == self._PHASE:
+                return phase
+            if field == self._MOMENTUM:
+                return momentum
+            return 0
+        return _get
+
+    def _scroll(self, hook, flags=0, **kwargs):
+        cg_event = MagicMock(name="cg_event")
+        self.mock_quartz.CGEventGetIntegerValueField.side_effect = \
+            self._field_getter(**kwargs)
+        self.mock_quartz.CGEventGetFlags.return_value = flags
+        return hook._event_tap_callback(
+            None, self._kCGEventScrollWheel, cg_event, None)
+
+    def test_the_injected_marker_is_passed_straight_back_out(self):
+        hook = self._make_hook()
+        cg_event = MagicMock(name="injected")
+        self.mock_quartz.CGEventGetIntegerValueField.side_effect = \
+            self._field_getter(source_user_data=mouse_hook._SMOOTH_SCROLL_MARKER)
+
+        result = hook._event_tap_callback(
+            None, self._kCGEventScrollWheel, cg_event, None)
+
+        self.assertIs(result, cg_event)
+        self.assertTrue(hook._scroll_engine.idle)
+
+    def test_smooth_swallows_the_wheel_and_schedules_a_glide(self):
+        hook = self._make_hook()
+
+        result = self._scroll(hook, v_fixed=65536)
+
+        self.assertIsNone(result)
+        self.assertFalse(hook._scroll_engine.idle)
+
+    def test_smooth_off_leaves_the_wheel_alone(self):
+        hook = self._make_hook(smooth=False)
+
+        result = self._scroll(hook, v_fixed=65536)
+
+        self.assertIsNotNone(result)
+
+    def test_a_trackpad_phase_is_never_smoothed(self):
+        # ignore_trackpad governs mapped-action dispatch. The smooth gate is
+        # separate: a trackpad stream is already continuous, so animating it a
+        # second time is catastrophic whether or not that setting is on.
+        hook = self._make_hook(ignore_trackpad=False)
+
+        result = self._scroll(hook, v_fixed=65536, phase=1)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(hook._scroll_engine.idle)
+
+    def test_trackpad_momentum_is_never_smoothed(self):
+        hook = self._make_hook(ignore_trackpad=False)
+
+        result = self._scroll(hook, v_fixed=65536, momentum=2)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(hook._scroll_engine.idle)
+
+    def test_a_blocked_hscroll_action_is_not_also_animated(self):
+        # A wheel tilt mapped to "volume up" fires that action and nothing
+        # else; panning the page underneath as well would be a second effect
+        # the user never asked for.
+        hook = self._make_hook()
+
+        result = self._scroll(hook, h_fixed=3 * 65536)
+
+        self.assertIsNone(result)
+        self.assertTrue(hook._scroll_engine.idle)
+
+    def test_an_unblocked_hscroll_still_animates(self):
+        hook = self._make_hook()
+        hook.unblock(mouse_hook.MouseEvent.HSCROLL_LEFT)
+        hook.unblock(mouse_hook.MouseEvent.HSCROLL_RIGHT)
+
+        result = self._scroll(hook, h_fixed=3 * 65536)
+
+        self.assertIsNone(result)
+        self.assertFalse(hook._scroll_engine.idle)
+
+    def test_option_wheel_reaches_the_app_untouched(self):
+        # Option+wheel is Photoshop's cursor-anchored zoom (issue #315). With
+        # smooth scroll on, the original event has to go through as-is rather
+        # than be swallowed and replayed as a plain glide.
+        hook = self._make_hook()
+
+        result = self._scroll(hook, v_fixed=65536,
+                              flags=self._kCGEventFlagMaskAlternate)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(hook._scroll_engine.idle)
+        self.mock_quartz.CGEventCreateScrollWheelEvent.assert_not_called()
+
+    def test_ctrl_zoom_reposts_with_the_control_flag_retained(self):
+        # The application reads the physical Ctrl state to decide this is a
+        # zoom, so stripping the flag would turn it back into a scroll.
+        hook = self._make_hook(mod_scroll_ctrl_zoom=True, mod_scroll_gain=3.0)
+        self.mock_quartz.CGEventCreateScrollWheelEvent.return_value = MagicMock()
+
+        result = self._scroll(hook, v_fixed=65536,
+                              flags=self._kCGEventFlagMaskControl)
+
+        self.assertIsNone(result)
+        set_flags = self.mock_quartz.CGEventSetFlags.call_args_list
+        self.assertTrue(set_flags)
+        for call in set_flags:
+            self.assertTrue(call.args[1] & self._kCGEventFlagMaskControl)
+
+    def test_ctrl_zoom_fires_once_per_detent_not_per_frame(self):
+        hook = self._make_hook(mod_scroll_ctrl_zoom=True, mod_scroll_gain=3.0)
+        self.mock_quartz.CGEventCreateScrollWheelEvent.return_value = MagicMock()
+
+        self._scroll(hook, v_fixed=65536, flags=self._kCGEventFlagMaskControl)
+
+        self.assertEqual(
+            self.mock_quartz.CGEventCreateScrollWheelEvent.call_count, 3
+        )
+        self.assertTrue(hook._scroll_engine.idle)
+
+    def test_the_injected_frame_carries_the_marker(self):
+        hook = self._make_hook()
+        self.mock_quartz.CGEventCreateScrollWheelEvent.return_value = MagicMock()
+
+        hook._emit_smooth_scroll(7, 0)
+
+        marker_calls = [
+            c for c in
+            self.mock_quartz.CGEventSetIntegerValueField.call_args_list
+            if c.args[2] == mouse_hook._SMOOTH_SCROLL_MARKER
+        ]
+        self.assertEqual(len(marker_calls), 1)
+        self.mock_quartz.CGEventPost.assert_called_once()
+
+    def test_the_injected_frame_is_in_pixel_units(self):
+        hook = self._make_hook()
+        self.mock_quartz.CGEventCreateScrollWheelEvent.return_value = MagicMock()
+
+        hook._emit_smooth_scroll(7, -2)
+
+        args = self.mock_quartz.CGEventCreateScrollWheelEvent.call_args.args
+        self.assertEqual(args[1], self.mock_quartz.kCGScrollEventUnitPixel)
+        self.assertEqual(args[3], 7)
+        self.assertEqual(args[4], -2)
+
+    def test_modifier_state_reads_the_event_flags(self):
+        hook = self._make_hook()
+        cg_event = MagicMock(name="cg_event")
+        self.mock_quartz.CGEventGetFlags.return_value = (
+            self._kCGEventFlagMaskShift | self._kCGEventFlagMaskControl)
+
+        mask = hook.modifier_state(cg_event)
+
+        self.assertTrue(mask & mouse_hook.MOD_SHIFT_BIT)
+        self.assertTrue(mask & mouse_hook.MOD_CTRL_BIT)
+
+    def test_modifier_state_without_an_event_is_empty(self):
+        self.assertEqual(self._make_hook().modifier_state(), 0)
 
 
 class GestureEventFamilyTests(unittest.TestCase):

@@ -7,6 +7,7 @@ import os
 import stat
 import sys
 import threading
+import time
 
 try:
     import select as _select_mod
@@ -26,6 +27,16 @@ from core.logi_devices import (
 )
 from core.mouse_hook_base import BaseMouseHook, HidGestureListener
 from core.mouse_hook_types import HidRuntimeState, MouseEvent, hscroll_event_type
+from core.scroll_engine import AXIS_H, AXIS_V
+from core.scroll_modifiers import (
+    MOD_ALT,
+    MOD_CTRL_BIT,
+    MOD_META,
+    MOD_SHIFT_BIT,
+    ScrollAccumulator,
+    modifier_names,
+    resolve_wheel_action,
+)
 
 _LOGI_VENDOR = 0x046D
 _LOG_ONCE_KEYS = set()
@@ -44,6 +55,42 @@ _REMAP_STATUS_MESSAGES = {
     ),
 }
 _REMAP_RECOVERY_STATUS = "Linux evdev remapping restored."
+
+
+# evdev key code -> core.scroll_modifiers bit. Built lazily against _ecodes so
+# the module still imports where python-evdev is absent.
+def _build_modifier_key_bits():
+    if not _EVDEV_OK:
+        return {}
+    pairs = (
+        ("KEY_LEFTSHIFT", MOD_SHIFT_BIT),
+        ("KEY_RIGHTSHIFT", MOD_SHIFT_BIT),
+        ("KEY_LEFTCTRL", MOD_CTRL_BIT),
+        ("KEY_RIGHTCTRL", MOD_CTRL_BIT),
+        ("KEY_LEFTALT", MOD_ALT),
+        ("KEY_RIGHTALT", MOD_ALT),
+        ("KEY_LEFTMETA", MOD_META),
+        ("KEY_RIGHTMETA", MOD_META),
+    )
+    table = {}
+    for name, bit in pairs:
+        code = getattr(_ecodes, name, None)
+        if code is not None:
+            table[code] = bit
+    return table
+
+
+_MODIFIER_KEY_BITS = _build_modifier_key_bits()
+
+# One EVIOCGKEY ioctl per keyboard per read, so a hi-res burst of ~15 events
+# would otherwise cost 15 ioctls per device for an answer that cannot have
+# changed.
+_MOD_CACHE_TTL_S = 0.012
+
+# A scroll frame is in pixels; libinput's notional detent is 120 hi-res units,
+# and 40 px per detent matches the usual three-lines default.
+HI_RES_UNITS_PER_PX = 120.0 / 40.0
+
 
 
 def _log_once(key, message):
@@ -112,6 +159,15 @@ class MouseHook(BaseMouseHook):
         self._evdev_connected_device = None
         self._evdev_device = None
         self._uinput = None
+        # Every uinput write goes through this. Two threads write now --
+        # the evdev reader and the scroll tick thread -- and without it a
+        # frame can land between a REL_X and its SYN_REPORT, or a write can
+        # race _close_uinput and hit a closed (or recycled) descriptor.
+        self._uinput_lock = threading.Lock()
+        self._uinput_hi_res = False
+        self._mod_v_accum = ScrollAccumulator()
+        self._mod_h_accum = ScrollAccumulator()
+        self._mod_cache = (0.0, 0)
         self._evdev_thread = None
         self._rescan_requested = threading.Event()
         self._evdev_wakeup = threading.Event()
@@ -214,12 +270,39 @@ class MouseHook(BaseMouseHook):
             self._emit_status(message)
 
     def _close_uinput(self):
-        if self._uinput:
+        with self._uinput_lock:
+            device, self._uinput = self._uinput, None
+        if device:
             try:
-                self._uinput.close()
+                device.close()
             except Exception:
                 pass
-            self._uinput = None
+
+    def _uinput_write(self, *reports):
+        """The single uinput write path.
+
+        Each report is ``("event", evdev_event)`` or ``("rel", code, value)``.
+        Everything in one call is written under one lock hold, so a report
+        the kernel is meant to see as one motion cannot be split by a frame
+        from the scroll thread.
+        """
+        with self._uinput_lock:
+            device = self._uinput
+            if device is None:
+                return False
+            try:
+                for report in reports:
+                    if report[0] == "event":
+                        device.write_event(report[1])
+                    else:
+                        device.write(_ecodes.EV_REL, report[1], report[2])
+            except OSError as exc:
+                _log_once(
+                    ("uinput-write-error", type(exc).__name__),
+                    f"[MouseHook] uinput write failed: {exc}",
+                )
+                return False
+        return True
 
     def _disable_evdev_remapping(self, reason=None):
         self._set_evdev_remap_ready(False, reason)
@@ -234,15 +317,17 @@ class MouseHook(BaseMouseHook):
         if self._evdev_remap_ready:
             return True
         if self._uinput is None:
+            hi_res = self._smooth_scroll_wanted()
             try:
                 self._uinput = _UInput(
-                    events=self._filtered_uinput_events(dev),
+                    events=self._filtered_uinput_events(dev, hi_res=hi_res),
                     name="Mouser Virtual Mouse",
                     vendor=getattr(dev.info, "vendor", 1),
                     product=getattr(dev.info, "product", 1),
                     version=getattr(dev.info, "version", 1),
                     bustype=getattr(dev.info, "bustype", 0x03),
                 )
+                self._uinput_hi_res = hi_res
             except PermissionError:
                 print(
                     "[MouseHook] Permission denied — add user to 'input' group "
@@ -525,7 +610,13 @@ class MouseHook(BaseMouseHook):
             dev.close()
         return False
 
-    def _filtered_uinput_events(self, dev):
+    def _filtered_uinput_events(self, dev, *, hi_res=False):
+        """Capabilities for the virtual mouse.
+
+        Hi-res wheel codes are dropped by default: passing both the hi-res and
+        the legacy code through for the same motion makes libinput count it
+        twice. The smooth engine needs them, and asks for them explicitly.
+        """
         caps = dict(dev.capabilities(absinfo=False))
         for filtered_type in (_ecodes.EV_SYN, getattr(_ecodes, "EV_FF", None)):
             if filtered_type is not None:
@@ -536,7 +627,15 @@ class MouseHook(BaseMouseHook):
             getattr(_ecodes, "REL_WHEEL_HI_RES", None),
             getattr(_ecodes, "REL_HWHEEL_HI_RES", None),
         }
-        filtered_rel_caps = [code for code in rel_caps if code not in hi_res_codes]
+        hi_res_codes.discard(None)
+        if hi_res:
+            filtered_rel_caps = list(rel_caps)
+            for code in sorted(hi_res_codes):
+                if code not in filtered_rel_caps:
+                    filtered_rel_caps.append(code)
+        else:
+            filtered_rel_caps = [code for code in rel_caps
+                                 if code not in hi_res_codes]
         # Ensure REL_HWHEEL is available so Shift+wheel translation can emit
         # horizontal scroll even on mice without a tilt wheel.  Only add when
         # the source already exposes REL events (i.e. is a mouse-like device).
@@ -544,7 +643,8 @@ class MouseHook(BaseMouseHook):
             filtered_rel_caps.append(_ecodes.REL_HWHEEL)
         if filtered_rel_caps != rel_caps:
             caps[rel_type] = filtered_rel_caps
-            if rel_caps and any(c in hi_res_codes for c in rel_caps):
+            if not hi_res and rel_caps and any(c in hi_res_codes
+                                               for c in rel_caps):
                 print(
                     "[MouseHook] Filtering REL_WHEEL_HI_RES / "
                     "REL_HWHEEL_HI_RES from Mouser Virtual Mouse"
@@ -552,7 +652,7 @@ class MouseHook(BaseMouseHook):
         return caps
 
     def _ensure_keyboard_devices(self):
-        """Open keyboard evdev devices (read-only) for Shift detection."""
+        """Open keyboard evdev devices (read-only) for modifier detection."""
         if self._keyboard_devices_initialised or not _EVDEV_OK:
             return
         self._keyboard_devices_initialised = True
@@ -564,10 +664,10 @@ class MouseHook(BaseMouseHook):
                 f"[MouseHook] Cannot list evdev devices for Shift detection: {exc}",
             )
             return
-        shift_codes = {
-            _ecodes.KEY_LEFTSHIFT,
-            _ecodes.KEY_RIGHTSHIFT,
-        }
+        # Any modifier qualifies, not only Shift: a device that reports Ctrl
+        # but no Shift key -- a split keyboard's half, a macro pad -- is still
+        # the only place Ctrl+wheel can be observed from.
+        modifier_codes = set(_MODIFIER_KEY_BITS)
         keyboards = []
         for path in paths:
             try:
@@ -579,7 +679,7 @@ class MouseHook(BaseMouseHook):
             try:
                 caps = dev.capabilities(absinfo=False)
                 key_caps = set(caps.get(_ecodes.EV_KEY, []))
-                if key_caps & shift_codes:
+                if key_caps & modifier_codes:
                     keyboards.append(dev)
                     continue
             except Exception:
@@ -592,7 +692,7 @@ class MouseHook(BaseMouseHook):
         if keyboards:
             print(
                 f"[MouseHook] Tracking {len(keyboards)} keyboard device(s) "
-                "for Shift+wheel detection"
+                "for modifier+wheel detection"
             )
 
     def _close_keyboard_devices(self):
@@ -604,16 +704,27 @@ class MouseHook(BaseMouseHook):
         self._keyboard_devices = []
         self._keyboard_devices_initialised = False
 
-    def _shift_held(self):
-        """Return True if any Shift key is currently held."""
+    def modifier_state(self, native_event=None):
+        """Modifiers held right now, as a ``core.scroll_modifiers`` mask.
+
+        Each call is one EVIOCGKEY ioctl per tracked keyboard, so the result is
+        cached: a hi-res wheel emits about fifteen events per detent, and a
+        modifier cannot meaningfully change inside one burst.
+        """
+        now = time.monotonic()
+        stamp, cached = self._mod_cache
+        if now - stamp < _MOD_CACHE_TTL_S:
+            return cached
+        mask = self._read_modifier_mask()
+        self._mod_cache = (now, mask)
+        return mask
+
+    def _read_modifier_mask(self):
         if not self._keyboard_devices_initialised:
             self._ensure_keyboard_devices()
         if not self._keyboard_devices:
-            return False
-        shift_codes = (
-            _ecodes.KEY_LEFTSHIFT,
-            _ecodes.KEY_RIGHTSHIFT,
-        )
+            return 0
+        mask = 0
         stale = []
         for dev in self._keyboard_devices:
             try:
@@ -623,14 +734,11 @@ class MouseHook(BaseMouseHook):
                 continue
             except Exception:
                 continue
-            for code in shift_codes:
-                if code in active:
-                    if stale:
-                        self._drop_stale_keyboards(stale)
-                    return True
+            for code in active:
+                mask |= _MODIFIER_KEY_BITS.get(code, 0)
         if stale:
             self._drop_stale_keyboards(stale)
-        return False
+        return mask
 
     def _drop_stale_keyboards(self, stale):
         for dev in stale:
@@ -715,13 +823,13 @@ class MouseHook(BaseMouseHook):
                 if self._ui_passthrough:
                     continue
                 if event.type == _ecodes.EV_SYN:
-                    self._uinput.write_event(event)
+                    self._uinput_write(("event", event))
                 elif event.type == _ecodes.EV_KEY:
                     self._handle_button(event)
                 elif event.type == _ecodes.EV_REL:
                     self._handle_rel(event)
                 else:
-                    self._uinput.write_event(event)
+                    self._uinput_write(("event", event))
 
     def _handle_button(self, event):
         if self._ui_passthrough or not self._evdev_remap_ready:
@@ -779,7 +887,7 @@ class MouseHook(BaseMouseHook):
             self._dispatch(mouse_event)
 
         if not should_block:
-            self._uinput.write_event(event)
+            self._uinput_write(("event", event))
 
     def _handle_rel(self, event):
         if self._ui_passthrough or not self._evdev_remap_ready:
@@ -802,23 +910,17 @@ class MouseHook(BaseMouseHook):
                 else:
                     self._gesture_recognizer.sample(0, value, "evdev")
                 return
-            self._uinput.write_event(event)
+            self._uinput_write(("event", event))
             return
 
         rel_wheel_hi_res = getattr(_ecodes, "REL_WHEEL_HI_RES", 0x0B)
         if code == _ecodes.REL_WHEEL or code == rel_wheel_hi_res:
-            if value != 0 and self._shift_held():
-                if code == _ecodes.REL_WHEEL:
-                    h_value = -value if (self.invert_hscroll and not self.wheel_native_invert_active) else value
-                    self._uinput.write(_ecodes.EV_REL, _ecodes.REL_HWHEEL, h_value)
-                # REL_WHEEL_HI_RES events are suppressed while Shift is held so
-                # the vertical scroll doesn't double-fire alongside the
-                # translated horizontal scroll.
+            if value != 0 and self._handle_wheel_translation(code, value, event):
                 return
             if self.invert_vscroll and not self.wheel_native_invert_active:
-                self._uinput.write(_ecodes.EV_REL, code, -value)
+                self._uinput_write(("rel", code, -value))
             else:
-                self._uinput.write_event(event)
+                self._uinput_write(("event", event))
             return
 
         rel_hwheel_hi_res = getattr(_ecodes, "REL_HWHEEL_HI_RES", 0x0C)
@@ -829,15 +931,137 @@ class MouseHook(BaseMouseHook):
             if code == _ecodes.REL_HWHEEL and event_type:
                 self._dispatch(MouseEvent(event_type, abs(value)))
 
+            # A mapped tilt action wins outright: a wheel tilt bound to "volume
+            # up" must fire that and nothing else, not also pan the page.
             if should_block:
                 return
+            if value != 0 and self._smooth_scroll_wanted():
+                if self._push_smooth_wheel(code, value, self.modifier_state()):
+                    return
             if self.invert_hscroll and not self.wheel_native_invert_active:
-                self._uinput.write(_ecodes.EV_REL, code, -value)
+                self._uinput_write(("rel", code, -value))
             else:
-                self._uinput.write_event(event)
+                self._uinput_write(("event", event))
             return
 
-        self._uinput.write_event(event)
+        self._uinput_write(("event", event))
+
+    # ── Software scroll engine ────────────────────────────────────────────
+
+    def _smooth_scroll_wanted(self):
+        engine = self._scroll_engine
+        return engine is not None and engine.config.enabled
+
+    def configure_smooth_scroll(self, settings):
+        """Rebuild the virtual mouse when the hi-res capability has to change.
+
+        uinput capabilities are fixed at creation, so turning smooth scroll on
+        or off means destroying and recreating the device. The virtual mouse
+        disappears for that instant, and a button held right then can stick --
+        unavoidable, and the reason this only happens on a settings change.
+        """
+        was_hi_res = self._uinput_hi_res
+        super().configure_smooth_scroll(settings)
+        if self._uinput is None or self._smooth_scroll_wanted() == was_hi_res:
+            return
+        self._disable_evdev_remapping()
+        self._enable_evdev_remapping()
+
+    def _make_scroll_emitter(self):
+        if not _EVDEV_OK:
+            return None
+        return self._emit_smooth_scroll
+
+    def _emit_smooth_scroll(self, dy, dx):
+        """Inject one frame of the glide into the virtual mouse.
+
+        No marker is needed: these writes go to the virtual device, which is
+        not the one the grab reads from, so they never re-enter the hook.
+        """
+        reports = []
+        wheel_hi_res = getattr(_ecodes, "REL_WHEEL_HI_RES", None)
+        hwheel_hi_res = getattr(_ecodes, "REL_HWHEEL_HI_RES", None)
+        if dy and wheel_hi_res is not None:
+            # Positive REL_WHEEL is up, and a positive frame delta is downward
+            # pixel motion, so the sign flips here.
+            reports.append(("rel", wheel_hi_res,
+                            -int(round(dy * HI_RES_UNITS_PER_PX))))
+        if dx and hwheel_hi_res is not None:
+            reports.append(("rel", hwheel_hi_res,
+                            int(round(dx * HI_RES_UNITS_PER_PX))))
+        if reports:
+            self._uinput_write(*reports)
+
+    def _handle_wheel_translation(self, code, value, event):
+        """Modifier translation or smooth injection. True means consumed."""
+        mask = self.modifier_state()
+        if self._smooth_scroll_wanted():
+            return self._push_smooth_wheel(code, value, mask)
+        if self._mod_scroll is None:
+            return False
+        plan = resolve_wheel_action(mask, self._mod_scroll)
+        if plan.is_noop:
+            return False
+        if code != _ecodes.REL_WHEEL:
+            # A hi-res fragment of a burst whose legacy event is translated
+            # separately; swallow it so the motion is not counted twice.
+            return True
+        v_delta = self._mod_v_accum.feed(value, plan.v_scale)
+        h_delta = self._mod_h_accum.feed(value, plan.h_scale)
+        reports = []
+        if h_delta:
+            reports.append(("rel", _ecodes.REL_HWHEEL, h_delta))
+        if v_delta:
+            reports.append(("rel", _ecodes.REL_WHEEL, v_delta))
+        if reports:
+            self._uinput_write(*reports)
+        return True
+
+    def _push_smooth_wheel(self, code, value, mask):
+        wheel_hi_res = getattr(_ecodes, "REL_WHEEL_HI_RES", None)
+        hwheel_hi_res = getattr(_ecodes, "REL_HWHEEL_HI_RES", None)
+        # The kernel sends both the hi-res and the legacy code for the same
+        # motion. Taking the hi-res one and ignoring its legacy twin is what
+        # keeps one detent from counting as two.
+        if code == _ecodes.REL_WHEEL and self._device_has_hi_res_wheel():
+            return True
+        if code == _ecodes.REL_HWHEEL and self._device_has_hi_res_wheel():
+            return True
+        if code in (wheel_hi_res, _ecodes.REL_WHEEL):
+            axis = AXIS_V
+            magnitude = abs(value) / (120.0 if code == wheel_hi_res else 1.0)
+            # REL_WHEEL positive is up; the engine's positive is downward.
+            direction = -1 if value > 0 else 1
+        else:
+            axis = AXIS_H
+            magnitude = abs(value) / (120.0 if code == hwheel_hi_res else 1.0)
+            direction = 1 if value > 0 else -1
+        outcome = self._scroll_engine.push_tick(
+            axis, direction, magnitude, modifiers=modifier_names(mask)
+        )
+        if outcome.passthrough_repeats:
+            step = -outcome.passthrough_direction
+            reports = [("rel", _ecodes.REL_WHEEL, step)
+                       for _ in range(outcome.passthrough_repeats)]
+            self._uinput_write(*reports)
+            return True
+        if not outcome.swallow:
+            return False
+        if self._scroll_driver is not None:
+            self._scroll_driver.wake()
+        return True
+
+    def _device_has_hi_res_wheel(self):
+        if self._evdev_device is None:
+            return False
+        wheel_hi_res = getattr(_ecodes, "REL_WHEEL_HI_RES", None)
+        if wheel_hi_res is None:
+            return False
+        try:
+            caps = self._evdev_device.capabilities(absinfo=False)
+        except Exception:
+            return False
+        return wheel_hi_res in set(caps.get(_ecodes.EV_REL, []))
 
     def _install_crash_guard(self):
         import atexit
