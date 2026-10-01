@@ -704,6 +704,7 @@ class _FakeHook:
         self.wheel_divert_active = False  # back-compat alias
         self._hid_gesture = None
         self._blocked_events = set()
+        self.scroll_settings = None
 
     def set_debug_callback(self, cb): pass
     def set_gesture_callback(self, cb): pass
@@ -712,6 +713,7 @@ class _FakeHook:
     def set_battery_notify_callback(self, cb): pass
     def configure_gestures(self, **kwargs): pass
     def configure_wheel_multipliers(self, v, h): return None
+    def configure_smooth_scroll(self, settings): self.scroll_settings = settings
     def block(self, event_type): pass
     def register(self, event_type, callback): pass
     def reset_bindings(self): pass

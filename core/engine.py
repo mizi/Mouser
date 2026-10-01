@@ -19,6 +19,7 @@ from core.config import (
     WHEEL_DIVERT_OFF, coerce_wheel_divert_setting,
     GESTURE_SWIPE_ACTION, BUTTON_GESTURE_OWNERS, BUTTON_GESTURE_DIRECTIONS,
     button_gesture_owners, button_gesture_bindings_for, button_gesture_tap_action,
+    effective_scroll_settings, SCROLL_TUNING_DEFAULTS,
 )
 from core.app_detector import AppDetector
 from core.mouse_hook_types import HidRuntimeState
@@ -171,6 +172,7 @@ class Engine:
         self.hook.invert_hscroll = settings.get("invert_hscroll", False)
         if hasattr(self.hook, "ignore_trackpad"):
             self.hook.ignore_trackpad = settings.get("ignore_trackpad", True)
+        self._push_scroll_tuning()
         self.hook.debug_mode = self._debug_events_enabled
         ring_btn_key = next(
             (k for k, v in mappings.items()
@@ -1595,12 +1597,56 @@ class Engine:
             self._setup_hooks()
             self._emit_debug(f"reload_mappings profile={self._current_profile}")
 
+    def _push_scroll_tuning(self, active=True):
+        """Hand the scroll settings to the hook, or None to stop injecting.
+
+        The settings are the active profile's view of them, so a per-app
+        override (Shift+wheel left alone in MS Project, say) takes effect on
+        the same profile switch that rewires the buttons.
+        """
+        if not hasattr(self.hook, "configure_smooth_scroll"):
+            return
+        self.hook.configure_smooth_scroll(
+            effective_scroll_settings(self.cfg) if active else None
+        )
+
+    def apply_scroll_tuning(self, source_cfg=None):
+        """Adopt the scroll settings from ``source_cfg`` and re-push them.
+
+        The UI owns its own copy of the config, so the values it just saved
+        are not in ``self.cfg``; ``source_cfg`` is that copy, and without it
+        the saved file is read back. Only the scroll keys and the per-profile
+        scroll overrides are taken -- the rest of ``self.cfg`` is left alone.
+
+        Deliberately not `reload_mappings`: that rebuilds every button
+        callback and re-registers the hook, which on macOS can re-arm the
+        event tap. A slider commits every 400 ms while it is being dragged.
+        """
+        source = source_cfg if source_cfg is not None else load_config()
+        with self._lock:
+            mine = self.cfg.setdefault("settings", {})
+            theirs = source.get("settings", {})
+            for key in SCROLL_TUNING_DEFAULTS:
+                if key in theirs:
+                    mine[key] = theirs[key]
+            my_profiles = self.cfg.get("profiles", {})
+            for name, pdata in source.get("profiles", {}).items():
+                if name in my_profiles and isinstance(pdata, dict):
+                    my_profiles[name]["scroll_overrides"] = dict(
+                        pdata.get("scroll_overrides") or {}
+                    )
+            self._push_scroll_tuning()
+
     def set_enabled(self, enabled):
         self._enabled = bool(enabled)
+        # "Disable Mouser" has to stop the injector too, or a glide keeps
+        # feeding scroll into whatever is focused.
+        self._push_scroll_tuning(self._enabled)
 
     def set_ui_passthrough(self, enabled):
         if hasattr(self.hook, "set_ui_passthrough"):
             self.hook.set_ui_passthrough(enabled)
+        self._push_scroll_tuning(not enabled)
 
     def _emit_linux_permission_warning(self):
         report = linux_permission_report()

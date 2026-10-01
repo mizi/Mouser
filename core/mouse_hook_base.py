@@ -12,6 +12,8 @@ except Exception:
 
 from core.gesture_recognizer import GestureRecognizer
 from core.mouse_hook_types import HidRuntimeState, MouseEvent, format_debug_details
+from core.scroll_engine import ScrollConfig, ScrollDriver, ScrollEngine
+from core.scroll_modifiers import ModScrollSettings
 
 # Swipe direction -> event, per event family. The Gesture button (thumb)
 # always uses the gesture_* family; the Sense Panel (MX Master 4 primary
@@ -56,7 +58,16 @@ class BaseMouseHook:
         self._battery_notify_cb = None
         self.divert_mode_shift = False
         self.divert_dpi_switch = False
-        self.wheel_native_invert_active = False
+        self._wheel_native_invert_active = False
+        # Software scroll engine. `_scroll_settings` is the raw settings
+        # dict, kept so the ScrollConfig can be rebuilt when the firmware
+        # invert state flips without the engine ever hearing about HID++.
+        self._scroll_settings = None
+        self._scroll_engine = None
+        self._scroll_driver = None
+        # Modifier translation for the smooth-off path. None means the
+        # hook translates nothing: Mouser disabled, or UI pass-through.
+        self._mod_scroll = None
         self._gesture_direction_enabled = False
         self._gesture_os_passthrough = False
         self._gesture_move_callback = None
@@ -143,6 +154,110 @@ class BaseMouseHook:
         Native-invert mode does no scroll injection, so wheel multipliers are
         unused here; subclasses that inject scroll may override this."""
         return None
+
+    # ── Software scroll engine ────────────────────────────────────────────
+
+    @property
+    def wheel_native_invert_active(self):
+        """True while the device firmware performs the scroll inversion itself.
+
+        The OS-layer and software-engine inversion paths must both stand down
+        when this is set, or the wheel flips twice and reads as not inverted.
+        """
+        return self._wheel_native_invert_active
+
+    @wheel_native_invert_active.setter
+    def wheel_native_invert_active(self, value):
+        value = bool(value)
+        if value == self._wheel_native_invert_active:
+            return
+        self._wheel_native_invert_active = value
+        self._on_wheel_invert_mode_changed()
+
+    def _on_wheel_invert_mode_changed(self):
+        """Rebuild the scroll config against the new firmware invert state."""
+        if self._scroll_settings is not None:
+            self.configure_smooth_scroll(self._scroll_settings)
+
+    def configure_smooth_scroll(self, settings):
+        """Enable, retune or tear down the software scroll engine.
+
+        ``settings`` is a ``config["settings"]`` dict, or None to stop entirely
+        (Mouser disabled, KVM handoff, UI passthrough). Handing over the raw
+        dict rather than a built ScrollConfig lets the hook fold in the firmware
+        invert state, which only it knows.
+        """
+        if settings is None:
+            self._scroll_settings = None
+            self._mod_scroll = None
+            self._teardown_scroll_engine()
+            return
+        self._scroll_settings = settings
+        # Rebuilt here rather than per event: the hook proc reads it on
+        # every wheel message, and a free spin is thousands a second.
+        self._mod_scroll = ModScrollSettings.from_settings(settings)
+        config = ScrollConfig.from_settings(
+            settings, native_invert_active=self._wheel_native_invert_active
+        )
+        if not config.enabled:
+            self._teardown_scroll_engine()
+            return
+        if self._scroll_engine is None:
+            self._scroll_engine = ScrollEngine(config)
+        else:
+            self._scroll_engine.configure(config)
+        emitter = self._make_scroll_emitter()
+        if emitter is None:
+            # No injector on this platform build; stay in pass-through rather
+            # than swallowing wheel events nothing will replace.
+            self._teardown_scroll_engine()
+            return
+        if self._scroll_driver is None:
+            self._scroll_driver = ScrollDriver(
+                self._scroll_engine,
+                emitter,
+                frame_interval_s=config.frame_interval_s,
+                frame_wrapper=self._scroll_frame_wrapper(),
+                sleep=self._scroll_sleep(),
+            )
+            self._scroll_driver.start()
+
+    def _make_scroll_emitter(self):
+        """Return ``emit(dy_px, dx_px)`` for this platform, or None.
+
+        The base class injects nothing, so smooth scroll stays inert until a
+        platform hook overrides this.
+        """
+        return None
+
+    def _scroll_frame_wrapper(self):
+        """Context manager entered once per emitted frame, or None."""
+        return None
+
+    def _scroll_sleep(self):
+        """Sleeper for the frame loop, or None for ``time.sleep``.
+
+        A platform whose default timer granularity is coarser than a frame
+        overrides this; otherwise the glide stutters at the timer's period
+        rather than the display's.
+        """
+        return None
+
+    def _teardown_scroll_engine(self):
+        driver, self._scroll_driver = self._scroll_driver, None
+        if driver is not None:
+            driver.stop()
+        if self._scroll_engine is not None:
+            self._scroll_engine.reset()
+
+    def modifier_state(self, native_event=None):
+        """Modifier keys held right now, as a ``core.scroll_modifiers`` mask.
+
+        Platform hooks override this: macOS reads the flags already on the
+        scroll event, Windows polls the key state, Linux reads the keyboard
+        devices it tracks.
+        """
+        return 0
 
     def configure_gestures(
         self,
