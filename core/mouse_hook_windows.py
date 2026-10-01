@@ -27,6 +27,16 @@ from core.key_simulator import MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL
 from core.key_simulator import inject_scroll as _inject_scroll_impl
 from core.mouse_hook_base import BaseMouseHook, HidGestureListener
 from core.mouse_hook_types import MouseEvent, hscroll_event_type
+from core.scroll_engine import AXIS_H, AXIS_V
+from core.scroll_modifiers import (
+    MOD_ALT,
+    MOD_CTRL_BIT,
+    MOD_META,
+    MOD_SHIFT_BIT,
+    ScrollAccumulator,
+    modifier_names,
+    resolve_wheel_action,
+)
 
 WH_MOUSE_LL = 14
 WM_MOUSEMOVE = 0x0200
@@ -93,6 +103,27 @@ GetAsyncKeyState.argtypes = [c_int]
 GetAsyncKeyState.restype = ctypes.c_short
 
 VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+
+_VK_MOD_BITS = (
+    (VK_SHIFT, MOD_SHIFT_BIT),
+    (VK_CONTROL, MOD_CTRL_BIT),
+    (VK_MENU, MOD_ALT),
+    (VK_LWIN, MOD_META),
+    (VK_RWIN, MOD_META),
+)
+
+# A hi-res wheel emits ~15 messages per detent about a millisecond apart.
+# Polling four keys for each of them is 60 syscalls where 4 will do, and a
+# modifier cannot meaningfully change inside one burst.
+_MOD_CACHE_TTL_S = 0.008
+
+# WHEEL_DELTA is 120 per detent; 40 px per detent is the Windows default
+# three-lines-at-about-13px. Frames are handed to SendInput in wheel units.
+WHEEL_UNITS_PER_PX = 120.0 / 40.0
 
 WM_QUIT = 0x0012
 INJECTED_FLAG = 0x00000001
@@ -220,7 +251,10 @@ def hiword(dword):
 WM_APP = 0x8000
 WM_APP_INJECT_VSCROLL = WM_APP + 1
 WM_APP_INJECT_HSCROLL = WM_APP + 2
-WM_APP_INJECT_SHIFT_HSCROLL = WM_APP + 3
+# One message for every modifier translation: the plan can change mid-burst
+# when the user releases the modifier, so a per-mode message would leave a
+# partial burst queued under the old meaning.
+WM_APP_INJECT_MOD_SCROLL = WM_APP + 3
 
 WM_DEVICECHANGE = 0x0219
 DBT_DEVNODES_CHANGED = 0x0007
@@ -228,6 +262,62 @@ DBT_DEVNODES_CHANGED = 0x0007
 PostMessageW = windll.user32.PostMessageW
 PostMessageW.argtypes = [wintypes.HWND, c_uint, wintypes.WPARAM, wintypes.LPARAM]
 PostMessageW.restype = wintypes.BOOL
+
+
+# The default Windows timer period is ~15.6 ms, more than a frame, so a frame
+# loop on plain time.sleep stutters. A high-resolution waitable timer is the
+# documented way to ask for better; timeBeginPeriod is the fallback for builds
+# before Windows 10 1803, and is held only while the loop runs.
+CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002
+TIMER_ALL_ACCESS = 0x1F0003
+
+
+class _FrameSleeper:
+    """Sleeps for a fraction of a frame at a usable resolution."""
+
+    def __init__(self):
+        self._timer = None
+        self._period_set = False
+        try:
+            self._timer = windll.kernel32.CreateWaitableTimerExW(
+                None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS,
+            )
+        except Exception:
+            self._timer = None
+        if not self._timer:
+            try:
+                windll.winmm.timeBeginPeriod(1)
+                self._period_set = True
+            except Exception:
+                self._period_set = False
+
+    def __call__(self, seconds):
+        if seconds <= 0:
+            return
+        if self._timer:
+            # Negative means relative, in 100 ns units.
+            due = wintypes.LARGE_INTEGER(int(-seconds * 10_000_000))
+            if windll.kernel32.SetWaitableTimer(
+                self._timer, byref(due), 0, None, None, False
+            ):
+                windll.kernel32.WaitForSingleObject(self._timer, 0xFFFFFFFF)
+                return
+        time.sleep(seconds)
+
+    def close(self):
+        if self._timer:
+            try:
+                windll.kernel32.CloseHandle(self._timer)
+            except Exception:
+                pass
+            self._timer = None
+        if self._period_set:
+            try:
+                windll.winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+            self._period_set = False
 
 
 class MouseHook(BaseMouseHook):
@@ -245,10 +335,16 @@ class MouseHook(BaseMouseHook):
         self._hook_proc = None
         self._pending_vscroll = 0
         self._pending_hscroll = 0
-        self._pending_shift_hscroll = 0
+        self._pending_mod_v = 0
+        self._pending_mod_h = 0
         self._vscroll_posted = False
         self._hscroll_posted = False
-        self._shift_hscroll_posted = False
+        self._mod_scroll_posted = False
+        self._mod_v_accum = ScrollAccumulator()
+        self._mod_h_accum = ScrollAccumulator()
+        self._smooth_accum = ScrollAccumulator()
+        self._mod_cache = (0.0, 0)
+        self._frame_sleeper = None
         self._ri_wndproc_ref = None
         self._ri_hwnd = None
         self._device_name_cache = {}
@@ -422,23 +518,8 @@ class MouseHook(BaseMouseHook):
 
             elif wParam == WM_MOUSEWHEEL:
                 delta = hiword(mouse_data)
-                if delta != 0 and (GetAsyncKeyState(VK_SHIFT) & 0x8000):
-                    if self._ri_hwnd:
-                        h_delta = -delta if self.invert_hscroll else delta
-                        self._pending_shift_hscroll += h_delta
-                        if self._shift_hscroll_posted:
-                            return 1
-                        if PostMessageW(
-                            self._ri_hwnd, WM_APP_INJECT_SHIFT_HSCROLL, 0, 0
-                        ):
-                            self._shift_hscroll_posted = True
-                            return 1
-                        self._pending_shift_hscroll -= h_delta
-                    else:
-                        self._emit_debug(
-                            "Shift+wheel translation skipped: "
-                            "raw input window unavailable"
-                        )
+                if delta != 0 and self._handle_vwheel(delta):
+                    return 1
                 if self.invert_vscroll and not self.wheel_native_invert_active:
                     if delta != 0 and self._ri_hwnd:
                         self._pending_vscroll += -delta
@@ -480,6 +561,129 @@ class MouseHook(BaseMouseHook):
                     return 1
 
         return CallNextHookEx(self._hook, nCode, wParam, lParam)
+
+    # ── Software scroll engine ────────────────────────────────────────────
+
+    def modifier_state(self, native_event=None):
+        """Modifiers held right now, cached for one hi-res burst.
+
+        GetAsyncKeyState is about a microsecond, but it runs inside the
+        low-level hook proc, which has a watchdog. Four calls per burst instead
+        of sixty keeps the proc's budget where it belongs.
+        """
+        now = time.monotonic()
+        stamp, cached = self._mod_cache
+        if now - stamp < _MOD_CACHE_TTL_S:
+            return cached
+        mask = 0
+        for vk, bit in _VK_MOD_BITS:
+            if GetAsyncKeyState(vk) & 0x8000:
+                mask |= bit
+        self._mod_cache = (now, mask)
+        return mask
+
+    def _handle_vwheel(self, delta):
+        """Smooth injection or modifier translation. True means swallow.
+
+        Everything expensive is deferred. The proc adds to a deque or to an
+        integer and posts one window message; a free spin at ~3000 events a
+        second cannot be allowed to do curve arithmetic here.
+        """
+        mask = self.modifier_state()
+        engine = self._scroll_engine
+        if engine is not None and engine.config.enabled:
+            return self._push_smooth_wheel(delta, mask)
+        if self._mod_scroll is None:
+            return False
+        plan = resolve_wheel_action(mask, self._mod_scroll)
+        if plan.is_noop:
+            return False
+        return self._post_mod_scroll(delta, plan)
+
+    def _push_smooth_wheel(self, delta, mask):
+        outcome = self._scroll_engine.push_tick(
+            AXIS_V,
+            1 if delta > 0 else -1,
+            abs(delta) / 120.0,
+            modifiers=modifier_names(mask),
+        )
+        if outcome.passthrough_repeats:
+            # Zoom is discrete. The application reads the physical Ctrl state
+            # itself, so re-injecting the scaled delta is the whole job.
+            step = outcome.passthrough_direction * 120
+            for _ in range(outcome.passthrough_repeats):
+                self._pending_mod_v += step
+            return self._post_pending_mod_scroll()
+        if not outcome.swallow:
+            return False
+        if self._scroll_driver is not None:
+            self._scroll_driver.wake()
+        return True
+
+    def _post_mod_scroll(self, delta, plan):
+        if not self._ri_hwnd:
+            self._emit_debug(
+                "Modifier scroll translation skipped: "
+                "raw input window unavailable"
+            )
+            return False
+        v_delta = self._mod_v_accum.feed(delta, plan.v_scale)
+        h_delta = self._mod_h_accum.feed(delta, plan.h_scale)
+        if not v_delta and not h_delta:
+            # The gain has not accumulated a whole unit yet. Swallow anyway, or
+            # the untranslated event reaches the app and the fraction is paid
+            # twice.
+            return True
+        self._pending_mod_v += v_delta
+        self._pending_mod_h += h_delta
+        return self._post_pending_mod_scroll()
+
+    def _post_pending_mod_scroll(self):
+        if self._mod_scroll_posted:
+            return True
+        if not self._ri_hwnd:
+            self._pending_mod_v = 0
+            self._pending_mod_h = 0
+            return False
+        if PostMessageW(self._ri_hwnd, WM_APP_INJECT_MOD_SCROLL, 0, 0):
+            self._mod_scroll_posted = True
+            return True
+        self._pending_mod_v = 0
+        self._pending_mod_h = 0
+        return False
+
+    def _make_scroll_emitter(self):
+        return self._emit_smooth_scroll
+
+    def _scroll_sleep(self):
+        if self._frame_sleeper is None:
+            self._frame_sleeper = _FrameSleeper()
+        return self._frame_sleeper
+
+    def _teardown_scroll_engine(self):
+        super()._teardown_scroll_engine()
+        sleeper, self._frame_sleeper = self._frame_sleeper, None
+        if sleeper is not None:
+            # The raised timer resolution is a system-wide setting; holding
+            # it while nothing is scrolling costs every process battery.
+            sleeper.close()
+
+    def _emit_smooth_scroll(self, dy, dx):
+        """Inject one frame of the glide.
+
+        SendInput is called from the tick thread, not the hook proc. The
+        documented re-entrancy hazard is calling it *inside* the proc; a
+        separate thread is not inside it, and the injected events are dropped
+        on the way back in by the existing INJECTED_FLAG check.
+        """
+        if dy:
+            units = self._smooth_accum.feed(dy, WHEEL_UNITS_PER_PX)
+            if units:
+                _inject_scroll_impl(MOUSEEVENTF_WHEEL, units)
+        if dx:
+            units = int(round(dx * WHEEL_UNITS_PER_PX))
+            if units:
+                _inject_scroll_impl(MOUSEEVENTF_HWHEEL, units)
 
     def _get_device_name(self, hDevice):
         if hDevice in self._device_name_cache:
@@ -525,12 +729,16 @@ class MouseHook(BaseMouseHook):
                 _inject_scroll_impl(MOUSEEVENTF_HWHEEL, delta)
             return 0
 
-        if msg == WM_APP_INJECT_SHIFT_HSCROLL:
-            delta = self._pending_shift_hscroll
-            self._pending_shift_hscroll = 0
-            self._shift_hscroll_posted = False
-            if delta != 0:
-                _inject_scroll_impl(MOUSEEVENTF_HWHEEL, delta)
+        if msg == WM_APP_INJECT_MOD_SCROLL:
+            v_delta = self._pending_mod_v
+            h_delta = self._pending_mod_h
+            self._pending_mod_v = 0
+            self._pending_mod_h = 0
+            self._mod_scroll_posted = False
+            if h_delta != 0:
+                _inject_scroll_impl(MOUSEEVENTF_HWHEEL, h_delta)
+            if v_delta != 0:
+                _inject_scroll_impl(MOUSEEVENTF_WHEEL, v_delta)
             return 0
 
         if msg == WM_DEVICECHANGE:
