@@ -5,7 +5,7 @@ import QtQuick.Layouts
 import "Theme.js" as Theme
 
 Item {
-    id: scrollPage
+    id: generalPage
     readonly property var theme: Theme.palette(uiState.darkMode)
 
     // Reactive shortcut — all s["key"] bindings update when lm.languageChanged fires
@@ -88,22 +88,22 @@ Item {
                     spacing: 4
 
                     Text {
-                        text: s["scroll.title"]
+                        text: s["general.title"]
                         font {
                             family: uiState.fontFamily
                             pixelSize: 24
                             bold: true
                         }
-                        color: scrollPage.theme.textPrimary
+                        color: generalPage.theme.textPrimary
                     }
 
                     Text {
-                        text: s["scroll.subtitle"]
+                        text: s["general.subtitle"]
                         font {
                             family: uiState.fontFamily
                             pixelSize: 13
                         }
-                        color: scrollPage.theme.textSecondary
+                        color: generalPage.theme.textSecondary
                     }
                 }
             }
@@ -111,7 +111,7 @@ Item {
             Rectangle {
                 width: parent.width - 72
                 height: 1
-                color: scrollPage.theme.border
+                color: generalPage.theme.border
                 anchors.horizontalCenter: parent.horizontalCenter
             }
 
@@ -125,9 +125,9 @@ Item {
                 anchors.horizontalCenter: parent.horizontalCenter
                 height: dpiContent.implicitHeight + 40
                 radius: Theme.radius
-                color: scrollPage.theme.bgCard
+                color: generalPage.theme.bgCard
                 border.width: 1
-                border.color: scrollPage.theme.border
+                border.color: generalPage.theme.border
 
                 Column {
                     id: dpiContent
@@ -146,7 +146,7 @@ Item {
                             pixelSize: 16
                             bold: true
                         }
-                        color: scrollPage.theme.textPrimary
+                        color: generalPage.theme.textPrimary
                     }
 
                     Text {
@@ -161,7 +161,7 @@ Item {
                             family: uiState.fontFamily
                             pixelSize: 12
                         }
-                        color: scrollPage.theme.textSecondary
+                        color: generalPage.theme.textSecondary
                     }
 
                     RowLayout {
@@ -174,7 +174,7 @@ Item {
                                 family: uiState.fontFamily
                                 pixelSize: 11
                             }
-                            color: scrollPage.theme.textDim
+                            color: generalPage.theme.textDim
                         }
 
                         WheelSafeSlider {
@@ -184,9 +184,9 @@ Item {
                             to: backend.deviceDpiMax
                             stepSize: 50
                             value: backend.dpi
-                            accentColor: scrollPage.theme.accent
-                            accentDimColor: scrollPage.theme.accentDim
-                            trackColor: scrollPage.theme.border
+                            accentColor: generalPage.theme.accent
+                            accentDimColor: generalPage.theme.accentDim
+                            trackColor: generalPage.theme.border
 
                             onMoved: {
                                 dpiLabel.text = Math.round(value) + " DPI"
@@ -200,14 +200,14 @@ Item {
                                 family: uiState.fontFamily
                                 pixelSize: 11
                             }
-                            color: scrollPage.theme.textDim
+                            color: generalPage.theme.textDim
                         }
 
                         Rectangle {
                             Layout.preferredWidth: 104
                             Layout.preferredHeight: 36
                             radius: 10
-                            color: scrollPage.theme.accentDim
+                            color: generalPage.theme.accentDim
 
                             Text {
                                 id: dpiLabel
@@ -218,7 +218,7 @@ Item {
                                     pixelSize: 14
                                     bold: true
                                 }
-                                color: scrollPage.theme.accent
+                                color: generalPage.theme.accent
                             }
                         }
                     }
@@ -239,23 +239,23 @@ Item {
                                 family: uiState.fontFamily
                                 pixelSize: 11
                             }
-                            color: scrollPage.theme.textDim
+                            color: generalPage.theme.textDim
                         }
 
                         Repeater {
-                            model: scrollPage.dpiPresets
+                            model: generalPage.dpiPresets
 
                             delegate: Rectangle {
                                 width: presetText.implicitWidth + 20
                                 height: 30
                                 radius: 8
                                 color: dpiSlider.value === modelData
-                                       ? scrollPage.theme.accent
+                                       ? generalPage.theme.accent
                                        : presetMouse.containsMouse
-                                         ? scrollPage.theme.bgCardHover
-                                         : scrollPage.theme.bgSubtle
+                                         ? generalPage.theme.bgCardHover
+                                         : generalPage.theme.bgSubtle
                                 border.width: 1
-                                border.color: scrollPage.theme.border
+                                border.color: generalPage.theme.border
 
                                 Accessible.role: Accessible.Button
                                 Accessible.name: modelData + " DPI"
@@ -271,8 +271,8 @@ Item {
                                         pixelSize: 12
                                     }
                                     color: dpiSlider.value === modelData
-                                           ? scrollPage.theme.bgSidebar
-                                           : scrollPage.theme.textPrimary
+                                           ? generalPage.theme.bgSidebar
+                                           : generalPage.theme.textPrimary
                                 }
 
                                 MouseArea {
@@ -292,306 +292,6 @@ Item {
                 }
             }
 
-            Item { width: 1; height: 16; visible: backend.smartShiftSupported && backend.deviceHasSmartShift }
-
-            // ── Scroll Wheel Mode ─────────────────────────────────
-            Rectangle {
-                visible: backend.smartShiftSupported && backend.deviceHasSmartShift
-                width: parent.width - 72
-                anchors.horizontalCenter: parent.horizontalCenter
-                height: smartShiftContent.implicitHeight + 40
-                radius: Theme.radius
-                color: scrollPage.theme.bgCard
-                border.width: 1
-                border.color: scrollPage.theme.border
-
-                Column {
-                    id: smartShiftContent
-                    anchors {
-                        left: parent.left
-                        right: parent.right
-                        top: parent.top
-                        margins: 20
-                    }
-                    spacing: 16
-
-                    // ── SmartShift header row with toggle ───────────────
-                    RowLayout {
-                        width: parent.width
-
-                        Column {
-                            spacing: 4
-                            Layout.fillWidth: true
-
-                            Text {
-                                text: s["scroll.smart_shift"]
-                                font {
-                                    family: uiState.fontFamily
-                                    pixelSize: 16
-                                    bold: true
-                                }
-                                color: scrollPage.theme.textPrimary
-                            }
-
-                            Text {
-                                text: s["scroll.smart_shift_desc"]
-                                font {
-                                    family: uiState.fontFamily
-                                    pixelSize: 12
-                                }
-                                color: scrollPage.theme.textSecondary
-                                wrapMode: Text.WordWrap
-                                width: parent.width
-                            }
-                        }
-
-                        Switch {
-                            id: smartShiftToggle
-                            checked: backend.smartShiftEnabled
-                            focusPolicy: Qt.StrongFocus
-                            Material.accent: scrollPage.theme.accent
-                            Accessible.name: s["scroll.smart_shift"]
-                            onClicked: backend.setSmartShiftEnabled(checked)
-                        }
-                    }
-
-                    // ── Sensitivity slider (visible when SmartShift ON) ─
-                    Column {
-                        visible: backend.smartShiftEnabled
-                        width: parent.width
-                        spacing: 8
-
-                        Text {
-                            text: s["scroll.sensitivity_value"]
-                            font {
-                                family: uiState.fontFamily
-                                pixelSize: 11
-                                bold: true
-                                letterSpacing: 0.8
-                            }
-                            color: scrollPage.theme.textDim
-                        }
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: 8
-
-                            Text {
-                                text: "1"
-                                font { family: uiState.fontFamily; pixelSize: 11 }
-                                color: scrollPage.theme.textDim
-                            }
-
-                            WheelSafeSlider {
-                                id: smartShiftSlider
-                                Layout.fillWidth: true
-                                from: 1
-                                to: 50
-                                stepSize: 1
-                                value: backend.smartShiftThreshold
-                                accentColor: scrollPage.theme.accent
-                                accentDimColor: scrollPage.theme.accentDim
-                                trackColor: scrollPage.theme.border
-
-                                onMoved: {
-                                    smartShiftLabel.text = Math.round(value * 2) + "%"
-                                    smartShiftDebounce.restart()
-                                }
-                            }
-
-                            Text {
-                                text: "50"
-                                font { family: uiState.fontFamily; pixelSize: 11 }
-                                color: scrollPage.theme.textDim
-                            }
-
-                            Rectangle {
-                                Layout.preferredWidth: 72
-                                Layout.preferredHeight: 36
-                                radius: 10
-                                color: scrollPage.theme.accentDim
-
-                                Text {
-                                    id: smartShiftLabel
-                                    anchors.centerIn: parent
-                                    text: Math.round(backend.smartShiftThreshold * 2) + "%"
-                                    font {
-                                        family: uiState.fontFamily
-                                        pixelSize: 14
-                                        bold: true
-                                    }
-                                    color: scrollPage.theme.accent
-                                }
-                            }
-                        }
-
-                        Timer {
-                            id: smartShiftDebounce
-                            interval: 400
-                            onTriggered: backend.setSmartShiftThreshold(Math.round(smartShiftSlider.value))
-                        }
-                    }
-
-                    // ── Scroll Mode (hidden when SmartShift ON) ─────────
-                    Column {
-                        visible: !backend.smartShiftEnabled
-                        width: parent.width
-                        spacing: 8
-
-                        Text {
-                            text: s["scroll.scroll_mode_section"]
-                            font {
-                                family: uiState.fontFamily
-                                pixelSize: 11
-                                bold: true
-                                letterSpacing: 0.8
-                            }
-                            color: scrollPage.theme.textDim
-                        }
-
-                        Row {
-                            width: parent.width
-                            spacing: 10
-
-                            Repeater {
-                                model: [
-                                    { value: "ratchet",  labelKey: "scroll.ratchet"  },
-                                    { value: "freespin", labelKey: "scroll.freespin" }
-                                ]
-
-                                delegate: Rectangle {
-                                    required property var modelData
-                                    width: Math.max(96, ssText.implicitWidth + 28)
-                                    height: 38
-                                    radius: 10
-                                    color: backend.smartShiftMode === modelData.value
-                                           ? scrollPage.theme.accentDim
-                                           : scrollPage.theme.bgSubtle
-                                    border.width: backend.smartShiftMode === modelData.value ? 2 : 1
-                                    border.color: backend.smartShiftMode === modelData.value
-                                                  ? scrollPage.theme.accent
-                                                  : scrollPage.theme.border
-
-                                    Accessible.role: Accessible.Button
-                                    Accessible.name: ssText.text
-                                    Accessible.checkable: true
-                                    Accessible.checked: backend.smartShiftMode === modelData.value
-                                    Accessible.onPressAction: backend.setSmartShift(modelData.value)
-
-                                    Text {
-                                        id: ssText
-                                        anchors.centerIn: parent
-                                        text: s[modelData.labelKey] || modelData.labelKey
-                                        font {
-                                            family: uiState.fontFamily
-                                            pixelSize: 12
-                                            bold: backend.smartShiftMode === modelData.value
-                                        }
-                                        color: backend.smartShiftMode === modelData.value
-                                               ? scrollPage.theme.accent
-                                               : scrollPage.theme.textPrimary
-                                    }
-
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: backend.setSmartShift(modelData.value)
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // ── Scroll Force slider (enhanced 0x2111 only; hidden in freespin) ──
-                    Column {
-                        visible: backend.smartShiftForceSupported
-                                 && (backend.smartShiftEnabled || backend.smartShiftMode === "ratchet")
-                        width: parent.width
-                        spacing: 8
-
-                        Text {
-                            text: s["scroll.scroll_force_value"] || "FORCE"
-                            font {
-                                family: uiState.fontFamily
-                                pixelSize: 11
-                                bold: true
-                                letterSpacing: 0.8
-                            }
-                            color: scrollPage.theme.textDim
-                        }
-
-                        Text {
-                            text: s["scroll.scroll_force_desc"]
-                            font {
-                                family: uiState.fontFamily
-                                pixelSize: 12
-                            }
-                            color: scrollPage.theme.textSecondary
-                            wrapMode: Text.WordWrap
-                            width: parent.width
-                        }
-
-                        RowLayout {
-                            width: parent.width
-                            spacing: 8
-
-                            Text {
-                                text: "1"
-                                font { family: uiState.fontFamily; pixelSize: 11 }
-                                color: scrollPage.theme.textDim
-                            }
-
-                            WheelSafeSlider {
-                                id: scrollForceSlider
-                                Layout.fillWidth: true
-                                from: 1
-                                to: 100
-                                stepSize: 1
-                                value: backend.scrollForce
-                                accentColor: scrollPage.theme.accent
-                                accentDimColor: scrollPage.theme.accentDim
-                                trackColor: scrollPage.theme.border
-
-                                onMoved: {
-                                    scrollForceLabel.text = Math.round(value) + "%"
-                                    scrollForceDebounce.restart()
-                                }
-                            }
-
-                            Text {
-                                text: "100"
-                                font { family: uiState.fontFamily; pixelSize: 11 }
-                                color: scrollPage.theme.textDim
-                            }
-
-                            Rectangle {
-                                Layout.preferredWidth: 72
-                                Layout.preferredHeight: 36
-                                radius: 10
-                                color: scrollPage.theme.accentDim
-
-                                Text {
-                                    id: scrollForceLabel
-                                    anchors.centerIn: parent
-                                    text: backend.scrollForce + "%"
-                                    font {
-                                        family: uiState.fontFamily
-                                        pixelSize: 14
-                                        bold: true
-                                    }
-                                    color: scrollPage.theme.accent
-                                }
-                            }
-                        }
-
-                        Timer {
-                            id: scrollForceDebounce
-                            interval: 400
-                            onTriggered: backend.setScrollForce(Math.round(scrollForceSlider.value))
-                        }
-                    }
-                }
-            }
 
             Item { width: 1; height: 16 }
 
@@ -601,9 +301,9 @@ Item {
                 anchors.horizontalCenter: parent.horizontalCenter
                 height: appearanceContent.implicitHeight + 40
                 radius: Theme.radius
-                color: scrollPage.theme.bgCard
+                color: generalPage.theme.bgCard
                 border.width: 1
-                border.color: scrollPage.theme.border
+                border.color: generalPage.theme.border
 
                 Column {
                     id: appearanceContent
@@ -622,7 +322,7 @@ Item {
                             pixelSize: 16
                             bold: true
                         }
-                        color: scrollPage.theme.textPrimary
+                        color: generalPage.theme.textPrimary
                     }
 
                     Text {
@@ -631,7 +331,7 @@ Item {
                             family: uiState.fontFamily
                             pixelSize: 12
                         }
-                        color: scrollPage.theme.textSecondary
+                        color: generalPage.theme.textSecondary
                     }
 
                     Row {
@@ -639,7 +339,7 @@ Item {
                         spacing: 10
 
                         Repeater {
-                            model: scrollPage.appearanceOptions
+                            model: generalPage.appearanceOptions
 
                             delegate: Rectangle {
                                 required property var modelData
@@ -647,14 +347,14 @@ Item {
                                 height: 38
                                 radius: 10
                                 color: backend.appearanceMode === modelData.value
-                                       ? scrollPage.theme.accent
+                                       ? generalPage.theme.accent
                                        : optionMouse.containsMouse
-                                         ? scrollPage.theme.bgCardHover
-                                         : scrollPage.theme.bgSubtle
+                                         ? generalPage.theme.bgCardHover
+                                         : generalPage.theme.bgSubtle
                                 border.width: 1
                                 border.color: backend.appearanceMode === modelData.value
-                                              ? scrollPage.theme.accent
-                                              : scrollPage.theme.border
+                                              ? generalPage.theme.accent
+                                              : generalPage.theme.border
 
                                 Accessible.role: Accessible.Button
                                 Accessible.name: modelData.label
@@ -671,8 +371,8 @@ Item {
                                         bold: backend.appearanceMode === modelData.value
                                     }
                                     color: backend.appearanceMode === modelData.value
-                                           ? scrollPage.theme.bgSidebar
-                                           : scrollPage.theme.textPrimary
+                                           ? generalPage.theme.bgSidebar
+                                           : generalPage.theme.textPrimary
                                 }
 
                                 MouseArea {
@@ -696,9 +396,9 @@ Item {
                 anchors.horizontalCenter: parent.horizontalCenter
                 height: languageContent.implicitHeight + 40
                 radius: Theme.radius
-                color: scrollPage.theme.bgCard
+                color: generalPage.theme.bgCard
                 border.width: 1
-                border.color: scrollPage.theme.border
+                border.color: generalPage.theme.border
 
                 Column {
                     id: languageContent
@@ -717,7 +417,7 @@ Item {
                             pixelSize: 16
                             bold: true
                         }
-                        color: scrollPage.theme.textPrimary
+                        color: generalPage.theme.textPrimary
                     }
 
                     Text {
@@ -726,7 +426,7 @@ Item {
                             family: uiState.fontFamily
                             pixelSize: 12
                         }
-                        color: scrollPage.theme.textSecondary
+                        color: generalPage.theme.textSecondary
                     }
 
                     Row {
@@ -742,14 +442,14 @@ Item {
                                 height: 38
                                 radius: 10
                                 color: lm.language === modelData.code
-                                       ? scrollPage.theme.accent
+                                       ? generalPage.theme.accent
                                        : langMa.containsMouse
-                                         ? scrollPage.theme.bgCardHover
-                                         : scrollPage.theme.bgSubtle
+                                         ? generalPage.theme.bgCardHover
+                                         : generalPage.theme.bgSubtle
                                 border.width: 1
                                 border.color: lm.language === modelData.code
-                                              ? scrollPage.theme.accent
-                                              : scrollPage.theme.border
+                                              ? generalPage.theme.accent
+                                              : generalPage.theme.border
 
                                 Behavior on color { ColorAnimation { duration: 120 } }
 
@@ -769,8 +469,8 @@ Item {
                                         bold: lm.language === modelData.code
                                     }
                                     color: lm.language === modelData.code
-                                           ? scrollPage.theme.bgSidebar
-                                           : scrollPage.theme.textPrimary
+                                           ? generalPage.theme.bgSidebar
+                                           : generalPage.theme.textPrimary
                                 }
 
                                 MouseArea {
@@ -795,9 +495,9 @@ Item {
                 anchors.horizontalCenter: parent.horizontalCenter
                 height: startupContent.implicitHeight + 40
                 radius: Theme.radius
-                color: scrollPage.theme.bgCard
+                color: generalPage.theme.bgCard
                 border.width: 1
-                border.color: scrollPage.theme.border
+                border.color: generalPage.theme.border
 
                 Column {
                     id: startupContent
@@ -816,7 +516,7 @@ Item {
                             pixelSize: 16
                             bold: true
                         }
-                        color: scrollPage.theme.textPrimary
+                        color: generalPage.theme.textPrimary
                     }
 
                     Text {
@@ -825,7 +525,7 @@ Item {
                             family: uiState.fontFamily
                             pixelSize: 12
                         }
-                        color: scrollPage.theme.textSecondary
+                        color: generalPage.theme.textSecondary
                         wrapMode: Text.WordWrap
                         width: parent.width
                     }
@@ -834,7 +534,7 @@ Item {
                         width: parent.width
                         height: 52
                         radius: 10
-                        color: scrollPage.theme.bgSubtle
+                        color: generalPage.theme.bgSubtle
                         visible: backend.supportsStartAtLogin
 
                         RowLayout {
@@ -850,7 +550,7 @@ Item {
                                     family: uiState.fontFamily
                                     pixelSize: 13
                                 }
-                                color: scrollPage.theme.textPrimary
+                                color: generalPage.theme.textPrimary
                                 Layout.fillWidth: true
                             }
 
@@ -858,7 +558,7 @@ Item {
                                 id: startAtLoginSwitch
                                 checked: backend.startAtLogin
                                 focusPolicy: Qt.StrongFocus
-                                Material.accent: scrollPage.theme.accent
+                                Material.accent: generalPage.theme.accent
                                 Accessible.name: s["scroll.start_at_login"]
                                 onClicked: backend.setStartAtLogin(checked)
                             }
@@ -869,7 +569,7 @@ Item {
                         width: parent.width
                         height: 52
                         radius: 10
-                        color: scrollPage.theme.bgSubtle
+                        color: generalPage.theme.bgSubtle
 
                         RowLayout {
                             anchors {
@@ -884,7 +584,7 @@ Item {
                                     family: uiState.fontFamily
                                     pixelSize: 13
                                 }
-                                color: scrollPage.theme.textPrimary
+                                color: generalPage.theme.textPrimary
                                 Layout.fillWidth: true
                             }
 
@@ -892,7 +592,7 @@ Item {
                                 id: startMinimizedSwitch
                                 checked: backend.startMinimized
                                 focusPolicy: Qt.StrongFocus
-                                Material.accent: scrollPage.theme.accent
+                                Material.accent: generalPage.theme.accent
                                 Accessible.name: s["scroll.start_minimized"]
                                 onClicked: backend.setStartMinimized(checked)
                             }
@@ -903,7 +603,7 @@ Item {
                         width: parent.width
                         height: 118
                         radius: 10
-                        color: scrollPage.theme.bgSubtle
+                        color: generalPage.theme.bgSubtle
 
                         ColumnLayout {
                             anchors {
@@ -929,7 +629,7 @@ Item {
                                             family: uiState.fontFamily
                                             pixelSize: 13
                                         }
-                                        color: scrollPage.theme.textPrimary
+                                        color: generalPage.theme.textPrimary
                                     }
 
                                     Text {
@@ -939,7 +639,7 @@ Item {
                                             family: uiState.fontFamily
                                             pixelSize: 11
                                         }
-                                        color: scrollPage.theme.textSecondary
+                                        color: generalPage.theme.textSecondary
                                         wrapMode: Text.WordWrap
                                     }
                                 }
@@ -948,7 +648,7 @@ Item {
                                     id: checkUpdatesSwitch
                                     checked: backend.checkForUpdates
                                     focusPolicy: Qt.StrongFocus
-                                    Material.accent: scrollPage.theme.accent
+                                    Material.accent: generalPage.theme.accent
                                     Accessible.name: s["scroll.check_for_updates"]
                                     onClicked: backend.setCheckForUpdates(checked)
                                 }
@@ -960,12 +660,12 @@ Item {
 
                                 Text {
                                     Layout.fillWidth: true
-                                    text: scrollPage.updateStatusText()
+                                    text: generalPage.updateStatusText()
                                     font {
                                         family: uiState.fontFamily
                                         pixelSize: 11
                                     }
-                                    color: scrollPage.theme.textSecondary
+                                    color: generalPage.theme.textSecondary
                                     elide: Text.ElideRight
                                 }
 
@@ -1030,9 +730,9 @@ Item {
                 anchors.horizontalCenter: parent.horizontalCenter
                 height: screenshotContent.implicitHeight + 40
                 radius: Theme.radius
-                color: scrollPage.theme.bgCard
+                color: generalPage.theme.bgCard
                 border.width: 1
-                border.color: scrollPage.theme.border
+                border.color: generalPage.theme.border
 
                 Column {
                     id: screenshotContent
@@ -1051,7 +751,7 @@ Item {
                             pixelSize: 16
                             bold: true
                         }
-                        color: scrollPage.theme.textPrimary
+                        color: generalPage.theme.textPrimary
                     }
 
                     Text {
@@ -1060,7 +760,7 @@ Item {
                             family: uiState.fontFamily
                             pixelSize: 12
                         }
-                        color: scrollPage.theme.textSecondary
+                        color: generalPage.theme.textSecondary
                         wrapMode: Text.WordWrap
                         width: parent.width
                     }
@@ -1069,7 +769,7 @@ Item {
                         width: parent.width
                         height: 58
                         radius: 10
-                        color: scrollPage.theme.bgSubtle
+                        color: generalPage.theme.bgSubtle
 
                         RowLayout {
                             anchors {
@@ -1090,7 +790,7 @@ Item {
                                         pixelSize: 12
                                         bold: true
                                     }
-                                    color: scrollPage.theme.textDim
+                                    color: generalPage.theme.textDim
                                 }
 
                                 Text {
@@ -1102,7 +802,7 @@ Item {
                                         family: uiState.fontFamily
                                         pixelSize: 13
                                     }
-                                    color: scrollPage.theme.textPrimary
+                                    color: generalPage.theme.textPrimary
                                     elide: Text.ElideMiddle
                                 }
                             }
@@ -1113,10 +813,10 @@ Item {
                                 Layout.preferredHeight: 34
                                 radius: 8
                                 color: chooseScreenshotMouse.containsMouse
-                                       ? scrollPage.theme.bgCardHover
-                                       : scrollPage.theme.bgCard
+                                       ? generalPage.theme.bgCardHover
+                                       : generalPage.theme.bgCard
                                 border.width: 1
-                                border.color: scrollPage.theme.border
+                                border.color: generalPage.theme.border
 
                                 Text {
                                     id: chooseScreenshotText
@@ -1126,7 +826,7 @@ Item {
                                         family: uiState.fontFamily
                                         pixelSize: 12
                                     }
-                                    color: scrollPage.theme.textPrimary
+                                    color: generalPage.theme.textPrimary
                                 }
 
                                 MouseArea {
@@ -1145,10 +845,10 @@ Item {
                                 radius: 8
                                 opacity: backend.hasCustomScreenshotDirectory ? 1.0 : 0.45
                                 color: resetScreenshotMouse.containsMouse && backend.hasCustomScreenshotDirectory
-                                       ? scrollPage.theme.bgCardHover
-                                       : scrollPage.theme.bgCard
+                                       ? generalPage.theme.bgCardHover
+                                       : generalPage.theme.bgCard
                                 border.width: 1
-                                border.color: scrollPage.theme.border
+                                border.color: generalPage.theme.border
 
                                 Text {
                                     id: resetScreenshotText
@@ -1158,7 +858,7 @@ Item {
                                         family: uiState.fontFamily
                                         pixelSize: 12
                                     }
-                                    color: scrollPage.theme.textPrimary
+                                    color: generalPage.theme.textPrimary
                                 }
 
                                 MouseArea {
@@ -1175,166 +875,6 @@ Item {
                 }
             }
 
-            Item { width: 1; height: 16 }
-
-            // ── Scroll Direction ──────────────────────────────────
-            Rectangle {
-                width: parent.width - 72
-                anchors.horizontalCenter: parent.horizontalCenter
-                height: scrollContent.implicitHeight + 40
-                radius: Theme.radius
-                color: scrollPage.theme.bgCard
-                border.width: 1
-                border.color: scrollPage.theme.border
-
-                Column {
-                    id: scrollContent
-                    anchors {
-                        left: parent.left
-                        right: parent.right
-                        top: parent.top
-                        margins: 20
-                    }
-                    spacing: 12
-
-                    Text {
-                        text: s["scroll.scroll_direction"]
-                        font {
-                            family: uiState.fontFamily
-                            pixelSize: 16
-                            bold: true
-                        }
-                        color: scrollPage.theme.textPrimary
-                    }
-
-                    Text {
-                        text: s["scroll.scroll_direction_desc"]
-                        font {
-                            family: uiState.fontFamily
-                            pixelSize: 12
-                        }
-                        color: scrollPage.theme.textSecondary
-                    }
-
-                    Rectangle {
-                        width: parent.width
-                        height: 52
-                        radius: 10
-                        color: scrollPage.theme.bgSubtle
-
-                        RowLayout {
-                            anchors {
-                                fill: parent
-                                leftMargin: 16
-                                rightMargin: 16
-                            }
-
-                            Text {
-                                text: s["scroll.invert_vertical"]
-                                font {
-                                    family: uiState.fontFamily
-                                    pixelSize: 13
-                                }
-                                color: scrollPage.theme.textPrimary
-                                Layout.fillWidth: true
-                            }
-
-                            Switch {
-                                id: vscrollSwitch
-                                checked: backend.invertVScroll
-                                focusPolicy: Qt.StrongFocus
-                                Material.accent: scrollPage.theme.accent
-                                Accessible.name: s["scroll.invert_vertical"]
-                                onClicked: backend.setInvertVScroll(checked)
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        width: parent.width
-                        height: 52
-                        radius: 10
-                        color: scrollPage.theme.bgSubtle
-
-                        RowLayout {
-                            anchors {
-                                fill: parent
-                                leftMargin: 16
-                                rightMargin: 16
-                            }
-
-                            Text {
-                                text: s["scroll.invert_horizontal"]
-                                font {
-                                    family: uiState.fontFamily
-                                    pixelSize: 13
-                                }
-                                color: scrollPage.theme.textPrimary
-                                Layout.fillWidth: true
-                            }
-
-                            Switch {
-                                id: hscrollSwitch
-                                checked: backend.invertHScroll
-                                focusPolicy: Qt.StrongFocus
-                                Material.accent: scrollPage.theme.accent
-                                Accessible.name: s["scroll.invert_horizontal"]
-                                onClicked: backend.setInvertHScroll(checked)
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        width: parent.width
-                        height: 62
-                        radius: 10
-                        color: scrollPage.theme.bgSubtle
-                        visible: backend.isMacOS
-
-                        RowLayout {
-                            anchors {
-                                fill: parent
-                                leftMargin: 16
-                                rightMargin: 16
-                            }
-                            spacing: 12
-
-                            Column {
-                                Layout.fillWidth: true
-                                spacing: 3
-
-                                Text {
-                                    text: s["scroll.ignore_trackpad"]
-                                    font {
-                                        family: uiState.fontFamily
-                                        pixelSize: 13
-                                    }
-                                    color: scrollPage.theme.textPrimary
-                                }
-
-                                Text {
-                                    width: parent.width
-                                    text: s["scroll.ignore_trackpad_desc"]
-                                    font {
-                                        family: uiState.fontFamily
-                                        pixelSize: 11
-                                    }
-                                    color: scrollPage.theme.textSecondary
-                                    wrapMode: Text.WordWrap
-                                }
-                            }
-
-                            Switch {
-                                id: ignoreTrackpadSwitch
-                                checked: backend.ignoreTrackpad
-                                Material.accent: scrollPage.theme.accent
-                                Accessible.name: s["scroll.ignore_trackpad"]
-                                onToggled: backend.setIgnoreTrackpad(checked)
-                            }
-                        }
-                    }
-                }
-            }
 
             Item { width: 1; height: 16 }
 
@@ -1344,9 +884,9 @@ Item {
                 anchors.horizontalCenter: parent.horizontalCenter
                 height: noteRow.implicitHeight + 28
                 radius: Theme.radius
-                color: scrollPage.theme.bgCard
+                color: generalPage.theme.bgCard
                 border.width: 1
-                border.color: scrollPage.theme.border
+                border.color: generalPage.theme.border
 
                 Row {
                     id: noteRow
@@ -1361,7 +901,7 @@ Item {
                         width: 18
                         height: 18
                         name: "warning"
-                        iconColor: scrollPage.theme.warning
+                        iconColor: generalPage.theme.warning
                     }
 
                     Text {
@@ -1371,7 +911,7 @@ Item {
                             family: uiState.fontFamily
                             pixelSize: 12
                         }
-                        color: scrollPage.theme.textDim
+                        color: generalPage.theme.textDim
                         wrapMode: Text.WordWrap
                     }
                 }
@@ -1399,19 +939,6 @@ Item {
                 startMinimizedSwitch.checked = backend.startMinimized
             }
             checkUpdatesSwitch.checked = backend.checkForUpdates
-            vscrollSwitch.checked = backend.invertVScroll
-            hscrollSwitch.checked = backend.invertHScroll
-            ignoreTrackpadSwitch.checked = backend.ignoreTrackpad
-        }
-        function onSmartShiftChanged() {
-            if (!scrollForceSlider.pressed) {
-                scrollForceSlider.value = backend.scrollForce
-                scrollForceLabel.text = backend.scrollForce + "%"
-            }
-            if (!smartShiftSlider.pressed) {
-                smartShiftSlider.value = backend.smartShiftThreshold
-                smartShiftLabel.text = Math.round(backend.smartShiftThreshold * 2) + "%"
-            }
         }
     }
 }

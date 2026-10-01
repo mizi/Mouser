@@ -28,6 +28,15 @@ ApplicationWindow {
                                                   : "monospace")
     property var s: lm.strings
     property int currentPage: 0
+
+    // navModel and contentStack are index-aligned by hand. Named constants
+    // are what make a misaligned literal a failing test rather than a page
+    // that silently opens the wrong one.
+    readonly property int pageMouse: 0
+    readonly property int pageScroll: 1
+    readonly property int pageHaptic: 2
+    readonly property int pageRing: 3
+    readonly property int pageGeneral: 4
     property Item hoveredNavItem: null
     property string hoveredNavText: ""
     property string hoveredNavTipKey: ""
@@ -38,15 +47,16 @@ ApplicationWindow {
 
     property var navModel: {
         var items = [
-            { icon: "mouse-simple", tipKey: "nav.mouse_profiles", page: 0 },
-            { icon: "sliders-horizontal", tipKey: "nav.point_scroll", page: 1 }
+            { icon: "mouse-simple", tipKey: "nav.mouse_profiles", page: root.pageMouse },
+            { icon: "arrows-vertical", tipKey: "nav.scroll", page: root.pageScroll }
         ]
         if (backend.hapticSupported) {
-            items.push({ icon: "circle", tipKey: "nav.haptic_feedback", page: 2 })
+            items.push({ icon: "circle", tipKey: "nav.haptic_feedback", page: root.pageHaptic })
         }
         if (backend.deviceHasActionsRing && backend.actionsRingActive) {
-            items.push({ icon: "target", tipKey: "nav.actions_ring", page: 3 })
+            items.push({ icon: "target", tipKey: "nav.actions_ring", page: root.pageRing })
         }
+        items.push({ icon: "sliders-horizontal", tipKey: "nav.point_scroll", page: root.pageGeneral })
         return items
     }
 
@@ -275,20 +285,27 @@ ApplicationWindow {
             Layout.fillHeight: true
             currentIndex: root.currentPage
 
+            // Every child stays declared unconditionally, even when its nav
+            // entry is hidden: the StackLayout indexes by position, so a
+            // conditional child would shift every page after it.
             MousePage {
                 id: mousePageView
             }
             Loader {
-                active: root.currentPage === 1 || item
-                source: "GeneralPage.qml"
+                active: root.currentPage === root.pageScroll || item
+                source: "ScrollPage.qml"
             }
             Loader {
-                active: (root.currentPage === 2 || item) && backend.hapticSupported
+                active: (root.currentPage === root.pageHaptic || item) && backend.hapticSupported
                 source: "HapticPage.qml"
             }
             Loader {
-                active: (root.currentPage === 3 || item) && backend.deviceHasActionsRing && backend.actionsRingActive
+                active: (root.currentPage === root.pageRing || item) && backend.deviceHasActionsRing && backend.actionsRingActive
                 source: "ActionsRingConfig.qml"
+            }
+            Loader {
+                active: root.currentPage === root.pageGeneral || item
+                source: "GeneralPage.qml"
             }
         }
     }

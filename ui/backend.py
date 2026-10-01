@@ -23,7 +23,9 @@ from core.config import (
     get_icon_for_exe, HAPTIC_ELIGIBLE_ACTIONS, set_action_haptic,
     set_button_haptic,
     GESTURE_SWIPE_ACTION, SWIPE_CAPABLE_BUTTONS, GESTURE_SWIPE_DIRECTIONS,
+    SCROLL_TUNING_DEFAULTS, SCROLL_TUNING_RANGES,
 )
+from core.scroll_engine import curve_samples
 from core import app_catalog
 from core.device_layouts import get_device_layout, get_manual_layout_choices
 from core.key_capture import create_super_key_guard
@@ -234,6 +236,10 @@ class Backend(QObject):
     statusMessage = Signal(str)
     dpiFromDevice = Signal(int)
     smartShiftChanged = Signal()
+    # Its own signal, not settingsChanged: that one is the notify for about
+    # fifteen properties the 2900-line MousePage binds, and a slider commits
+    # every 400 ms while it is being dragged.
+    scrollSettingsChanged = Signal()
     mouseConnectedChanged = Signal()
     hidFeaturesReadyChanged = Signal()
     batteryLevelChanged = Signal()
@@ -382,6 +388,9 @@ class Backend(QObject):
         self.mappingsChanged.connect(self._invalidate_buttons_cache)
         self.profilesChanged.connect(self._invalidate_profiles_cache)
         self.activeProfileChanged.connect(self._invalidate_profiles_cache)
+        # The per-app scroll list is built from the profiles, so adding or
+        # deleting one has to redraw it too.
+        self.profilesChanged.connect(self.scrollSettingsChanged)
         self.knownAppsChanged.connect(self._invalidate_known_apps_cache)
         self.deviceLayoutChanged.connect(self._invalidate_device_dependent_caches)
 
@@ -620,6 +629,58 @@ class Backend(QObject):
     @Property(int, notify=smartShiftChanged)
     def scrollForce(self):
         return int(self._cfg.get("settings", {}).get("scroll_force", 50))
+
+    @Property(int, notify=scrollSettingsChanged)
+    def vscrollDuration(self):
+        return self._scrollSetting("vscroll_duration")
+
+    @Property(int, notify=scrollSettingsChanged)
+    def vscrollBrakePoint(self):
+        return self._scrollSetting("vscroll_brake_point")
+
+    @Property(int, notify=scrollSettingsChanged)
+    def vscrollSpeed(self):
+        return self._scrollSetting("vscroll_speed")
+
+    @Property(int, notify=scrollSettingsChanged)
+    def vscrollAcceleration(self):
+        return self._scrollSetting("vscroll_acceleration")
+
+    @Property(int, notify=scrollSettingsChanged)
+    def vscrollSmoothness(self):
+        return self._scrollSetting("vscroll_smoothness")
+
+    @Property(bool, notify=scrollSettingsChanged)
+    def vscrollSmooth(self):
+        return bool(self._scrollSetting("vscroll_smooth"))
+
+    @Property(int, notify=scrollSettingsChanged)
+    def hscrollSpeed(self):
+        return self._scrollSetting("hscroll_speed")
+
+    @Property(bool, notify=scrollSettingsChanged)
+    def modScrollShiftHScroll(self):
+        return bool(self._scrollSetting("mod_scroll_shift_hscroll"))
+
+    @Property(bool, notify=scrollSettingsChanged)
+    def modScrollCtrlZoom(self):
+        return bool(self._scrollSetting("mod_scroll_ctrl_zoom"))
+
+    @Property(bool, notify=scrollSettingsChanged)
+    def modScrollCmdFast(self):
+        return bool(self._scrollSetting("mod_scroll_cmd_fast"))
+
+    @Property(bool, notify=scrollSettingsChanged)
+    def modScrollInvertHScroll(self):
+        return bool(self._scrollSetting("mod_scroll_invert_hscroll"))
+
+    @Property(bool, notify=scrollSettingsChanged)
+    def modScrollInvertZoom(self):
+        return bool(self._scrollSetting("mod_scroll_invert_zoom"))
+
+    @Property(float, notify=scrollSettingsChanged)
+    def modScrollGain(self):
+        return float(self._scrollSetting("mod_scroll_gain"))
 
     @Property(bool, notify=hidFeaturesReadyChanged)
     def smartShiftSupported(self):
@@ -1708,6 +1769,187 @@ class Backend(QObject):
                 settings.get("scroll_force", 50),
             )
         self.smartShiftChanged.emit()
+
+    # ── Scroll engine settings ────────────────────────────────────────────
+
+    def _scrollSetting(self, key):
+        return self._cfg.get("settings", {}).get(key, SCROLL_TUNING_DEFAULTS[key])
+
+    @staticmethod
+    def _clampScroll(key, value):
+        default = SCROLL_TUNING_DEFAULTS[key]
+        if isinstance(default, bool):
+            return bool(value)
+        caster = float if isinstance(default, float) else int
+        try:
+            number = caster(value)
+        except (TypeError, ValueError):
+            return default
+        if number != number or number in (float("inf"), float("-inf")):
+            return default
+        low, high = SCROLL_TUNING_RANGES[key]
+        return min(high, max(low, number))
+
+    def _applyScrollTuning(self, *, vscroll_duration=None, vscroll_brake_point=None,
+                           vscroll_speed=None, vscroll_acceleration=None,
+                           vscroll_smoothness=None, vscroll_smooth=None,
+                           hscroll_speed=None, mod_scroll_shift_hscroll=None,
+                           mod_scroll_ctrl_zoom=None, mod_scroll_cmd_fast=None,
+                           mod_scroll_invert_hscroll=None,
+                           mod_scroll_invert_zoom=None, mod_scroll_gain=None):
+        """Clamp, persist and push one or more scroll settings.
+
+        Keyword-only and spelled out rather than **kwargs so that grepping for
+        a config key still finds the write path, matching _applySmartShift.
+        """
+        incoming = {
+            "vscroll_duration": vscroll_duration,
+            "vscroll_brake_point": vscroll_brake_point,
+            "vscroll_speed": vscroll_speed,
+            "vscroll_acceleration": vscroll_acceleration,
+            "vscroll_smoothness": vscroll_smoothness,
+            "vscroll_smooth": vscroll_smooth,
+            "hscroll_speed": hscroll_speed,
+            "mod_scroll_shift_hscroll": mod_scroll_shift_hscroll,
+            "mod_scroll_ctrl_zoom": mod_scroll_ctrl_zoom,
+            "mod_scroll_cmd_fast": mod_scroll_cmd_fast,
+            "mod_scroll_invert_hscroll": mod_scroll_invert_hscroll,
+            "mod_scroll_invert_zoom": mod_scroll_invert_zoom,
+            "mod_scroll_gain": mod_scroll_gain,
+        }
+        settings = self._cfg.setdefault("settings", {})
+        pending = {}
+        for key, value in incoming.items():
+            if value is None:
+                continue
+            pending[key] = self._clampScroll(key, value)
+
+        # The brake point is a frame index into the stroke, so dragging the
+        # duration below it has to pull it down too; otherwise the graph and
+        # the mouse disagree about a value the user never touched.
+        duration = pending.get("vscroll_duration",
+                               self._scrollSetting("vscroll_duration"))
+        brake = pending.get("vscroll_brake_point",
+                            self._scrollSetting("vscroll_brake_point"))
+        if brake > duration:
+            pending["vscroll_brake_point"] = duration
+
+        changed = {k: v for k, v in pending.items()
+                   if settings.get(k, SCROLL_TUNING_DEFAULTS[k]) != v}
+        if not changed:
+            return
+        settings.update(changed)
+        save_config(self._cfg)
+        if self._engine:
+            self._engine.apply_scroll_tuning(self._cfg)
+        self.scrollSettingsChanged.emit()
+
+    @Slot(int)
+    def setVScrollDuration(self, value):
+        self._applyScrollTuning(vscroll_duration=value)
+
+    @Slot(int)
+    def setVScrollBrakePoint(self, value):
+        self._applyScrollTuning(vscroll_brake_point=value)
+
+    @Slot(int)
+    def setVScrollSpeed(self, value):
+        self._applyScrollTuning(vscroll_speed=value)
+
+    @Slot(int)
+    def setVScrollAcceleration(self, value):
+        self._applyScrollTuning(vscroll_acceleration=value)
+
+    @Slot(int)
+    def setVScrollSmoothness(self, value):
+        self._applyScrollTuning(vscroll_smoothness=value)
+
+    @Slot(bool)
+    def setVScrollSmooth(self, value):
+        self._applyScrollTuning(vscroll_smooth=value)
+
+    @Slot(int)
+    def setHScrollSpeed(self, value):
+        self._applyScrollTuning(hscroll_speed=value)
+
+    @Slot(bool)
+    def setModScrollShiftHScroll(self, value):
+        self._applyScrollTuning(mod_scroll_shift_hscroll=value)
+
+    @Slot(bool)
+    def setModScrollCtrlZoom(self, value):
+        self._applyScrollTuning(mod_scroll_ctrl_zoom=value)
+
+    @Slot(bool)
+    def setModScrollCmdFast(self, value):
+        self._applyScrollTuning(mod_scroll_cmd_fast=value)
+
+    @Slot(bool)
+    def setModScrollInvertHScroll(self, value):
+        self._applyScrollTuning(mod_scroll_invert_hscroll=value)
+
+    @Slot(bool)
+    def setModScrollInvertZoom(self, value):
+        self._applyScrollTuning(mod_scroll_invert_zoom=value)
+
+    @Slot(float)
+    def setModScrollGain(self, value):
+        self._applyScrollTuning(mod_scroll_gain=value)
+
+    _OVERRIDE_MODES = ("inherit", "on", "off")
+
+    @Property(list, notify=scrollSettingsChanged)
+    def profileShiftHScroll(self):
+        """Per-app state of Shift+wheel panning, for every app profile.
+
+        ``mode`` is "inherit" (follow the global switch), "on" or "off". The
+        Default profile is left out: it already is the global setting.
+        """
+        rows = []
+        for name, pdata in self._cfg.get("profiles", {}).items():
+            if name == "default":
+                continue
+            override = (pdata.get("scroll_overrides") or {}).get(
+                "mod_scroll_shift_hscroll")
+            rows.append({
+                "name": name,
+                "label": pdata.get("label", name),
+                "mode": "inherit" if override is None
+                        else ("on" if override else "off"),
+            })
+        return rows
+
+    @Slot(str, str)
+    def setProfileShiftHScroll(self, profile_name, mode):
+        profiles = self._cfg.get("profiles", {})
+        if profile_name not in profiles or mode not in self._OVERRIDE_MODES:
+            return
+        overrides = profiles[profile_name].setdefault("scroll_overrides", {})
+        current = overrides.get("mod_scroll_shift_hscroll")
+        wanted = None if mode == "inherit" else mode == "on"
+        if current == wanted:
+            return
+        if wanted is None:
+            overrides.pop("mod_scroll_shift_hscroll", None)
+        else:
+            overrides["mod_scroll_shift_hscroll"] = wanted
+        save_config(self._cfg)
+        if self._engine:
+            self._engine.apply_scroll_tuning(self._cfg)
+        self.scrollSettingsChanged.emit()
+
+    @Slot(int, int, int, int, int, result="QVariantList")
+    def scrollCurveSamples(self, duration, brake_point, speed, acceleration,
+                           smoothness):
+        """Graph samples for the scroll curve.
+
+        The same function the injector runs, so the drawn curve cannot quietly
+        disagree with what the mouse actually does. A JavaScript copy would be
+        a second implementation of the same physics with nothing keeping the
+        two equal, and QML here is only covered by source-substring tests.
+        """
+        return curve_samples(duration, brake_point, speed, acceleration,
+                             smoothness)
 
     @Slot(str)
     def setSmartShift(self, mode):

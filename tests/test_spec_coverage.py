@@ -79,6 +79,7 @@ REQUIRED_ASSETS = (
     os.path.join("images", "AppIcon.icns"),      # macOS bundle icon
     os.path.join("images", "logo_icon.png"),     # tray/autostart icon
     os.path.join("images", "icons", "mouse-simple.svg"),
+    os.path.join("images", "icons", "arrows-vertical.svg"),
     os.path.join("ui", "qml", "Theme.js"),
 )
 

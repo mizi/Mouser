@@ -136,5 +136,82 @@ class AccessibilityLocaleTests(unittest.TestCase):
                 )
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Key-set parity
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class LocaleKeyParityTests(unittest.TestCase):
+    def test_every_locale_carries_the_same_keys(self):
+        # Parity holds today but nothing enforced it, so a page's worth of
+        # strings could be added to English alone and ship green.
+        english = set(_TRANSLATIONS["en"])
+        for locale, strings in _TRANSLATIONS.items():
+            with self.subTest(locale=locale):
+                self.assertEqual(set(strings) - english, set(),
+                                 f"{locale} has keys English does not")
+                self.assertEqual(english - set(strings), set(),
+                                 f"{locale} is missing keys English has")
+
+    def test_no_locale_ships_an_empty_string(self):
+        for locale, strings in _TRANSLATIONS.items():
+            for key, value in strings.items():
+                with self.subTest(locale=locale, key=key):
+                    self.assertTrue(value.strip(), f"{locale}.{key} is blank")
+
+
+class ScrollPageStringTests(unittest.TestCase):
+    REQUIRED = (
+        "nav.scroll",
+        "general.title",
+        "general.subtitle",
+        "scroll.title",
+        "scroll.subtitle",
+        "scroll.physical_v",
+        "scroll.physical_h",
+        "scroll.modified_v",
+        "scroll.duration",
+        "scroll.brake_point",
+        "scroll.scroll_speed",
+        "scroll.acceleration",
+        "scroll.smoothness",
+        "scroll.hscroll_speed",
+        "scroll.smooth_scroll",
+        "scroll.mod_shift_hscroll",
+        "scroll.mod_ctrl_zoom",
+        "scroll.mod_cmd_fast",
+        "scroll.mod_super_fast",
+        "scroll.mod_invert_hscroll",
+        "scroll.mod_invert_zoom",
+        "scroll.mod_gain",
+        "scroll.graph_frames",
+        "scroll.graph_speed",
+        "scroll.graph_distance",
+    )
+
+    HELP_KEYS = (
+        "scroll.smooth_scroll_help",
+        "scroll.brake_point_help",
+        "scroll.acceleration_help",
+        "scroll.smoothness_help",
+        "scroll.mod_gain_help",
+    )
+
+    def test_every_scroll_page_string_exists_in_every_locale(self):
+        for locale, strings in _TRANSLATIONS.items():
+            for key in self.REQUIRED + self.HELP_KEYS:
+                with self.subTest(locale=locale, key=key):
+                    self.assertIn(key, strings)
+
+    def test_the_removed_presets_key_is_gone_everywhere(self):
+        for locale, strings in _TRANSLATIONS.items():
+            with self.subTest(locale=locale):
+                self.assertNotIn("scroll.scroll_speed_presets", strings)
+
+    def test_the_scroll_page_title_is_no_longer_the_general_one(self):
+        self.assertNotEqual(_TRANSLATIONS["en"]["scroll.title"],
+                            _TRANSLATIONS["en"]["general.title"])
+
+
 if __name__ == "__main__":
     unittest.main()
